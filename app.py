@@ -6,7 +6,9 @@ from ray.serve.gradio_integrations import GradioServer
 from functools import lru_cache
 from pinecone.grpc import PineconeGRPC as Pinecone
 import os
+import pymongo
 from more_itertools import chunked
+
 
 def get_embedding(text):
     client = openai.OpenAI(
@@ -20,19 +22,9 @@ def get_embedding(text):
     )
     return response.data[0].embedding
 
+
 def query_vector_index(text: str, threshold: float):
-    retries = 3
-    while retries > 0:
-        try:
-            embedding = get_embedding(text)
-            print("got embedding")
-        except Exception as e:
-            print(f"Error: {e}")
-            embedding = None
-            retries -= 1
-            continue
-        else:
-            break
+    embedding = compute_embedding(text)
     if embedding:
         pinecone_api_key = os.environ.get(
             "PINECONE_API_KEY", "8bacffe0-949c-480e-af65-5b309b7c9fe4"
@@ -45,26 +37,81 @@ def query_vector_index(text: str, threshold: float):
             namespace="descriptions",
         )
         print("queried pinecone")
-        matches = [
-            match for match in result["matches"]
-        ]
+        matches = [match for match in result["matches"]]
         print(f"{matches=}")
         filtered = [
-            match["id"] for match in result["matches"]
-            if match["score"] > threshold
+            match["id"] for match in result["matches"] if match["score"] > threshold
         ]
         print(f"{filtered=}")
         return filtered
 
+def compute_embedding(text):
+    retries = 3
+    while retries > 0:
+        try:
+            embedding = get_embedding(text)
+            print("got embedding")
+        except Exception as e:
+            print(f"Error: {e}")
+            embedding = None
+            retries -= 1
+            continue
+        else:
+            break
+    return embedding
+
 
 @lru_cache
 def read_data():
-    df = ray.data.read_json("s3://anyscale-public-materials/mongodb-demo/data_with_ai_v3/").to_pandas()
+    df = ray.data.read_json(
+        "s3://anyscale-public-materials/mongodb-demo/data_with_ai_v3/"
+    ).to_pandas()
     # df = ray.data.read_json("/mnt/cluster_storage/data_with_ai_8").to_pandas()
     return df
 
 
-# Filter function
+def filter_products_mongo(keywords_str, min_price, max_price, min_rating, n=20):
+    """Use pymongo to find records based on the provided filters."""
+    client = pymongo.MongoClient(
+        # os.environ["MONGODB_CONN_STR"],
+        "mongodb+srv://sarieddinemarwan:yLbV9diLKku0ieIm@mongodb-anyscale-demo-m.epezhiv.mongodb.net/?retryWrites=true&w=majority&appName=mongodb-anyscale-demo-marwan",
+    )
+    db = client.myDatabase
+    collection = db["myntra-items"]
+    pipeline = []
+    if keywords_str.strip():
+        pipeline.append(
+            {
+                "$search": {
+                    "index": "name-index-search",
+                    "text": {
+                        "query": keywords_str,
+                        "path": "name",
+                    },
+                }
+            }
+        )
+    pipeline.extend(
+        [
+            {
+                "$match": {
+                    "price": {"$gte": min_price, "$lte": max_price},
+                    "rating": {"$gte": min_rating},
+                }
+            },
+            {
+                "$limit": n,
+            },
+        ]
+    )
+    print(f"pipeline: {pipeline}")
+    records = collection.aggregate(pipeline)
+    results = [
+        (record["img"].split(";")[-1].strip(), record["name"]) for record in records
+    ]
+    return results
+
+
 def filter_products(keywords_str, min_price, max_price, min_rating, n=200):
     df = read_data()
     filtered_df = df[
@@ -87,7 +134,7 @@ def filter_products(keywords_str, min_price, max_price, min_rating, n=200):
                 )
             )
         ]
-    results =  [
+    results = [
         (row["img"].split(";")[-1].strip(), row["name"])
         for _, row in filtered_df.iterrows()
     ]
@@ -95,11 +142,57 @@ def filter_products(keywords_str, min_price, max_price, min_rating, n=200):
     return list(chunked(results, 10))
 
 
+def filter_products_with_ai_and_mongo(
+    synthetic_categories, text_search, min_price, max_price, min_rating, n=20
+):
+    pipeline = []
+    client = pymongo.MongoClient(
+        # os.environ["MONGODB_CONN_STR"],
+        "mongodb+srv://sarieddinemarwan:yLbV9diLKku0ieIm@mongodb-anyscale-demo-m.epezhiv.mongodb.net/?retryWrites=true&w=majority&appName=mongodb-anyscale-demo-marwan",
+    )
+    db = client.myDatabase
+    collection = db["myntra-items"]
+    if text_search.strip():
+        embedding = compute_embedding(text_search)
+        pipeline.append(
+            {
+                "$vectorSearch": {
+                    "queryVector": embedding,
+                    "path": "description_embedding",
+                    "numCandidates": 400,
+                    "index": "vector_index",
+                    "limit": 10,
+                }
+            }
+        )
+
+    pipeline.extend(
+        [
+            {
+                "$match": {
+                    "price": {"$gte": min_price, "$lte": max_price},
+                    "rating": {"$gte": min_rating},
+                    "category": {"$in": synthetic_categories},
+                }
+            },
+            {
+                "$limit": n,
+            },
+        ]
+    )
+
+    records = collection.aggregate(pipeline)
+    results = [
+        (record["img"].split(";")[-1].strip(), record["name"]) for record in records
+    ]
+    return results
+
+
 def filter_products_with_ai(
     synthetic_categories, text_search, min_price, max_price, min_rating, n=20
 ):
     df = read_data()
-    
+
     filtered_df = df[
         (df["price"] >= min_price)
         & (df["price"] <= max_price)
@@ -108,11 +201,12 @@ def filter_products_with_ai(
     ]
 
     if text_search.strip():
-        closest_names_based_on_text_search = query_vector_index(text_search, threshold=0.8)
+        closest_names_based_on_text_search = query_vector_index(
+            text_search, threshold=0.87
+        )
         filtered_df = filtered_df[
             filtered_df["name"].isin(closest_names_based_on_text_search)
         ]
-
 
     return [
         (row["img"].split(";")[-1].strip(), row["name"])
@@ -163,7 +257,10 @@ def build_interface():
                     filter_button_component = gr.Button("Filter")
                 with gr.Column(scale=3):
                     gallery = gr.Gallery(
-                        label="Filtered Products", columns=3, height=800, examples_per_page=10
+                        label="Filtered Products",
+                        columns=3,
+                        height=800,
+                        examples_per_page=10,
                     )
             inputs = [
                 keywords_component,
@@ -172,10 +269,10 @@ def build_interface():
                 min_rating_component,
             ]
             filter_button_component.click(
-                filter_products, inputs=inputs, outputs=gallery
+                filter_products_mongo, inputs=inputs, outputs=gallery
             )
             iface.load(
-                filter_products,
+                filter_products_mongo,
                 inputs=inputs,
                 outputs=gallery,
             )
@@ -208,7 +305,10 @@ def build_interface():
                     filter_button_component = gr.Button("Filter")
                 with gr.Column(scale=3):
                     gallery = gr.Gallery(
-                        label="Filtered Products", columns=3, height=800, examples_per_page=10
+                        label="Filtered Products",
+                        columns=3,
+                        height=800,
+                        examples_per_page=10,
                     )
             inputs = [
                 synthetic_category_component,
@@ -218,10 +318,10 @@ def build_interface():
                 min_rating_component,
             ]
             filter_button_component.click(
-                filter_products_with_ai, inputs=inputs, outputs=gallery
+                filter_products_with_ai_and_mongo, inputs=inputs, outputs=gallery
             )
             iface.load(
-                filter_products_with_ai,
+                filter_products_with_ai_and_mongo,
                 inputs=inputs,
                 outputs=gallery,
             )

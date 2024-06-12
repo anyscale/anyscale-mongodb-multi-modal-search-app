@@ -10,6 +10,14 @@ import os
 import joblib
 # from tenacity import retry, stop_after_attempt
 
+# {
+#   queryVector: [dimension1, dimension2, ...],
+#   path: "description_embedding",
+#   numCandidates: 400,
+#   index: "vector_index",
+#   limit: 10,
+#   filter: {expression}
+# }
 
 def setup_pinecone() -> None:
     pinecone_api_key = os.environ.get(

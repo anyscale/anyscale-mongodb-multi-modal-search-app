@@ -1,6 +1,6 @@
 import ray
 import pymongo
- 
+
 df = ray.data.read_json(
     "s3://anyscale-public-materials/mongodb-demo/data_with_ai_v3/"
 ).to_pandas()
@@ -15,15 +15,18 @@ except pymongo.errors.ConfigurationError as e:
     raise ValueError(
         "An Invalid URI host error was received. "
         "Is your Atlas host name correct in your connection string?"
-    ) from e 
-    
+    ) from e
+
 
 db = client.myDatabase
 my_collection = db["myntra-items"]
+my_collection.delete_many({})
 
 df["_id"] = df["name"]
-
-documents = df[["_id", "name", "img", "price"]].to_dict(orient="records")
+df["description_embedding"] = df["description_embedding"].apply(lambda x: x.tolist())
+documents = df[
+    ["_id", "name", "img", "price", "rating", "description_embedding", "category"]
+].to_dict(orient="records")
 
 try:
     result = my_collection.insert_many(documents)
