@@ -45,6 +45,7 @@ def query_vector_index(text: str, threshold: float):
         print(f"{filtered=}")
         return filtered
 
+
 def compute_embedding(text):
     retries = 3
     while retries > 0:
@@ -187,6 +188,121 @@ def filter_products_with_ai_and_mongo(
     ]
     return results
 
+
+def filter_products_with_ai_and_mongo_and_hybrid_search(
+    synthetic_categories, text_search, min_price, max_price, min_rating, n=20
+):
+    pipeline = []
+    client = pymongo.MongoClient(
+        # os.environ["MONGODB_CONN_STR"],
+        "mongodb+srv://sarieddinemarwan:yLbV9diLKku0ieIm@mongodb-anyscale-demo-m.epezhiv.mongodb.net/?retryWrites=true&w=majority&appName=mongodb-anyscale-demo-marwan",
+    )
+    db = client.myDatabase
+    collection = db["myntra-items"]
+    embedding = compute_embedding(text_search)
+    vector_penalty = 1
+    full_text_penalty = 10
+    records = collection.aggregate(
+        [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "description_embedding",
+                    "queryVector": embedding,
+                    "numCandidates": 100,
+                    "limit": 20,
+                }
+            },
+            {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
+            {"$unwind": {"path": "$docs", "includeArrayIndex": "rank"}},
+            {
+                "$addFields": {
+                    "vs_score": {
+                        "$divide": [1.0, {"$add": ["$rank", vector_penalty, 1]}]
+                    }
+                }
+            },
+            {"$project": {"vs_score": 1, "_id": "$docs._id", "name": "$docs.name", "img": "$docs.img"}},
+            {
+                "$unionWith": {
+                    "coll": "myntra-items",
+                    "pipeline": [
+                        {
+                            "$search": {
+                                "index": "name-index-search",
+                                "text": {
+                                    "query": text_search,
+                                    "path": "name",
+                                },
+                                # "phrase": {"query": text_search, "path": "name"},
+                            }
+                        },
+                        {
+                            # TODO - implement $match using pre-filters instead of a post-$search step
+                            "$match": {
+                                "price": {"$gte": min_price, "$lte": max_price},
+                                "rating": {"$gte": min_rating},
+                                "category": {"$in": synthetic_categories},
+                            }
+                        },
+                        {"$limit": 20},
+                        {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
+                        {"$unwind": {"path": "$docs", "includeArrayIndex": "rank"}},
+                        {
+                            "$addFields": {
+                                "fts_score": {
+                                    "$divide": [
+                                        1.0,
+                                        {"$add": ["$rank", full_text_penalty, 1]},
+                                    ]
+                                }
+                            }
+                        },
+                        {
+                            "$project": {
+                                "fts_score": 1,
+                                "_id": "$docs._id",
+                                "name": "$docs.name",
+                                "img": "$docs.img",
+                            }
+                        },
+                    ],
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$name",
+                    "img": {"$first": "$img"},
+                    "vs_score": {"$max": "$vs_score"},
+                    "fts_score": {"$max": "$fts_score"},
+                }
+            },
+            {
+                "$project": {
+                    "_id": 1,
+                    "img": 1,
+                    "vs_score": {"$ifNull": ["$vs_score", 0]},
+                    "fts_score": {"$ifNull": ["$fts_score", 0]},
+                }
+            },
+            {
+                "$project": {
+                    "score": {"$add": ["$fts_score", "$vs_score"]},
+                    "name": "$_id",
+                    "img": 1,
+                    "vs_score": 1,
+                    "fts_score": 1,
+                }
+            },
+            {"$sort": {"score": -1}},
+            {"$limit": n},
+        ]
+    )
+
+    results = [
+        (record["img"].split(";")[-1].strip(), record["name"]) for record in records
+    ]
+    return results
 
 def filter_products_with_ai(
     synthetic_categories, text_search, min_price, max_price, min_rating, n=20
