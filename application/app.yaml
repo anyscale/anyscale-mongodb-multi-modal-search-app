@@ -1,0 +1,15 @@
+name: mongo-multi-modal-search
+applications:
+  - name: frontend
+    route_prefix: /
+    import_path: application.frontend:app
+    deployments:
+      - name: gradio-frontend
+        num_replicas: 1
+  - name: backend
+    route_prefix: /backend
+    import_path: application.backend:app
+    deployments:
+      - name: search-backend
+        num_replicas: 1
+query_auth_token_enabled: false

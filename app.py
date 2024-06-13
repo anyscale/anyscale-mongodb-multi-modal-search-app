@@ -4,7 +4,6 @@ import gradio as gr
 import openai
 from ray.serve.gradio_integrations import GradioServer
 from functools import lru_cache
-from pinecone.grpc import PineconeGRPC as Pinecone
 import os
 import pymongo
 from more_itertools import chunked
@@ -21,29 +20,6 @@ def get_embedding(text):
         model="thenlper/gte-large",
     )
     return response.data[0].embedding
-
-
-def query_vector_index(text: str, threshold: float):
-    embedding = compute_embedding(text)
-    if embedding:
-        pinecone_api_key = os.environ.get(
-            "PINECONE_API_KEY", "8bacffe0-949c-480e-af65-5b309b7c9fe4"
-        )
-        pc = Pinecone(api_key=pinecone_api_key)
-        index = pc.Index("mongodb-demo")
-        result = index.query(
-            vector=embedding,
-            top_k=20,
-            namespace="descriptions",
-        )
-        print("queried pinecone")
-        matches = [match for match in result["matches"]]
-        print(f"{matches=}")
-        filtered = [
-            match["id"] for match in result["matches"] if match["score"] > threshold
-        ]
-        print(f"{filtered=}")
-        return filtered
 
 
 def compute_embedding(text):
@@ -113,82 +89,6 @@ def filter_products_mongo(keywords_str, min_price, max_price, min_rating, n=20):
     return results
 
 
-def filter_products(keywords_str, min_price, max_price, min_rating, n=200):
-    df = read_data()
-    filtered_df = df[
-        (df["price"] >= min_price)
-        & (df["price"] <= max_price)
-        & (df["rating"] >= min_rating)
-    ]
-    if keywords_str.strip():
-        keywords = keywords_str.split(",")
-        # matching any of the keywords
-        # filtered_df = filtered_df[
-        #     filtered_df["name"].str.contains("|".join(keywords), case=False)
-        # ]
-        # matching all of the keywords
-        filtered_df = filtered_df[
-            filtered_df["name"].apply(
-                lambda name: all(
-                    keyword.strip().lower() in name.lower().split()
-                    for keyword in keywords
-                )
-            )
-        ]
-    results = [
-        (row["img"].split(";")[-1].strip(), row["name"])
-        for _, row in filtered_df.iterrows()
-    ]
-
-    return list(chunked(results, 10))
-
-
-def filter_products_with_ai_and_mongo(
-    synthetic_categories, text_search, min_price, max_price, min_rating, n=20
-):
-    pipeline = []
-    client = pymongo.MongoClient(
-        # os.environ["MONGODB_CONN_STR"],
-        "mongodb+srv://sarieddinemarwan:yLbV9diLKku0ieIm@mongodb-anyscale-demo-m.epezhiv.mongodb.net/?retryWrites=true&w=majority&appName=mongodb-anyscale-demo-marwan",
-    )
-    db = client.myDatabase
-    collection = db["myntra-items"]
-    if text_search.strip():
-        embedding = compute_embedding(text_search)
-        pipeline.append(
-            {
-                "$vectorSearch": {
-                    "queryVector": embedding,
-                    "path": "description_embedding",
-                    "numCandidates": 400,
-                    "index": "vector_index",
-                    "limit": 10,
-                }
-            }
-        )
-
-    pipeline.extend(
-        [
-            {
-                "$match": {
-                    "price": {"$gte": min_price, "$lte": max_price},
-                    "rating": {"$gte": min_rating},
-                    "category": {"$in": synthetic_categories},
-                }
-            },
-            {
-                "$limit": n,
-            },
-        ]
-    )
-
-    records = collection.aggregate(pipeline)
-    results = [
-        (record["img"].split(";")[-1].strip(), record["name"]) for record in records
-    ]
-    return results
-
-
 def filter_products_with_ai_and_mongo_and_hybrid_search(
     synthetic_categories, text_search, min_price, max_price, min_rating, n=20
 ):
@@ -199,136 +99,130 @@ def filter_products_with_ai_and_mongo_and_hybrid_search(
     )
     db = client.myDatabase
     collection = db["myntra-items"]
-    embedding = compute_embedding(text_search)
-    vector_penalty = 1
-    full_text_penalty = 10
-    records = collection.aggregate(
-        [
-            {
-                "$vectorSearch": {
-                    "index": "vector_index",
-                    "path": "description_embedding",
-                    "queryVector": embedding,
-                    "numCandidates": 100,
-                    "limit": 20,
-                }
-            },
-            {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
-            {"$unwind": {"path": "$docs", "includeArrayIndex": "rank"}},
-            {
-                "$addFields": {
-                    "vs_score": {
-                        "$divide": [1.0, {"$add": ["$rank", vector_penalty, 1]}]
+    if text_search is not None:
+        embedding = compute_embedding(text_search)
+        vector_penalty = 1
+        full_text_penalty = 10
+        records = collection.aggregate(
+            [
+                {
+                    "$vectorSearch": {
+                        "index": "vector_index",
+                        "path": "description_embedding",
+                        "queryVector": embedding,
+                        "numCandidates": 100,
+                        "limit": 20,
                     }
-                }
-            },
-            {"$project": {"vs_score": 1, "_id": "$docs._id", "name": "$docs.name", "img": "$docs.img"}},
-            {
-                "$unionWith": {
-                    "coll": "myntra-items",
-                    "pipeline": [
-                        {
-                            "$search": {
-                                "index": "name-index-search",
-                                "text": {
-                                    "query": text_search,
-                                    "path": "name",
-                                },
-                                # "phrase": {"query": text_search, "path": "name"},
-                            }
-                        },
-                        {
-                            # TODO - implement $match using pre-filters instead of a post-$search step
-                            "$match": {
-                                "price": {"$gte": min_price, "$lte": max_price},
-                                "rating": {"$gte": min_rating},
-                                "category": {"$in": synthetic_categories},
-                            }
-                        },
-                        {"$limit": 20},
-                        {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
-                        {"$unwind": {"path": "$docs", "includeArrayIndex": "rank"}},
-                        {
-                            "$addFields": {
-                                "fts_score": {
-                                    "$divide": [
-                                        1.0,
-                                        {"$add": ["$rank", full_text_penalty, 1]},
-                                    ]
+                },
+                {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
+                {"$unwind": {"path": "$docs", "includeArrayIndex": "rank"}},
+                {
+                    "$addFields": {
+                        "vs_score": {
+                            "$divide": [1.0, {"$add": ["$rank", vector_penalty, 1]}]
+                        }
+                    }
+                },
+                {
+                    "$project": {
+                        "vs_score": 1,
+                        "_id": "$docs._id",
+                        "name": "$docs.name",
+                        "img": "$docs.img",
+                    }
+                },
+                {
+                    "$unionWith": {
+                        "coll": "myntra-items",
+                        "pipeline": [
+                            {
+                                "$search": {
+                                    "index": "name-index-search",
+                                    "text": {
+                                        "query": text_search,
+                                        "path": "name",
+                                    },
+                                    # "phrase": {"query": text_search, "path": "name"},
                                 }
-                            }
-                        },
-                        {
-                            "$project": {
-                                "fts_score": 1,
-                                "_id": "$docs._id",
-                                "name": "$docs.name",
-                                "img": "$docs.img",
-                            }
-                        },
-                    ],
-                }
-            },
-            {
-                "$group": {
-                    "_id": "$name",
-                    "img": {"$first": "$img"},
-                    "vs_score": {"$max": "$vs_score"},
-                    "fts_score": {"$max": "$fts_score"},
-                }
-            },
-            {
-                "$project": {
-                    "_id": 1,
-                    "img": 1,
-                    "vs_score": {"$ifNull": ["$vs_score", 0]},
-                    "fts_score": {"$ifNull": ["$fts_score", 0]},
-                }
-            },
-            {
-                "$project": {
-                    "score": {"$add": ["$fts_score", "$vs_score"]},
-                    "name": "$_id",
-                    "img": 1,
-                    "vs_score": 1,
-                    "fts_score": 1,
-                }
-            },
-            {"$sort": {"score": -1}},
-            {"$limit": n},
-        ]
-    )
-
+                            },
+                            {
+                                # TODO - implement $match using pre-filters instead of a post-$search step
+                                "$match": {
+                                    "price": {"$gte": min_price, "$lte": max_price},
+                                    "rating": {"$gte": min_rating},
+                                    "category": {"$in": synthetic_categories},
+                                }
+                            },
+                            {"$limit": 20},
+                            {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
+                            {"$unwind": {"path": "$docs", "includeArrayIndex": "rank"}},
+                            {
+                                "$addFields": {
+                                    "fts_score": {
+                                        "$divide": [
+                                            1.0,
+                                            {"$add": ["$rank", full_text_penalty, 1]},
+                                        ]
+                                    }
+                                }
+                            },
+                            {
+                                "$project": {
+                                    "fts_score": 1,
+                                    "_id": "$docs._id",
+                                    "name": "$docs.name",
+                                    "img": "$docs.img",
+                                }
+                            },
+                        ],
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": "$name",
+                        "img": {"$first": "$img"},
+                        "vs_score": {"$max": "$vs_score"},
+                        "fts_score": {"$max": "$fts_score"},
+                    }
+                },
+                {
+                    "$project": {
+                        "_id": 1,
+                        "img": 1,
+                        "vs_score": {"$ifNull": ["$vs_score", 0]},
+                        "fts_score": {"$ifNull": ["$fts_score", 0]},
+                    }
+                },
+                {
+                    "$project": {
+                        "score": {"$add": ["$fts_score", "$vs_score"]},
+                        "name": "$_id",
+                        "img": 1,
+                        "vs_score": 1,
+                        "fts_score": 1,
+                    }
+                },
+                {"$sort": {"score": -1}},
+                {"$limit": n},
+            ]
+        )
+    else:
+        records = collection.aggregate(
+            [
+                {
+                    "$match": {
+                        "price": {"$gte": min_price, "$lte": max_price},
+                        "rating": {"$gte": min_rating},
+                        "category": {"$in": synthetic_categories},
+                    }
+                },
+                {"$limit": n},
+            ]
+        )
     results = [
         (record["img"].split(";")[-1].strip(), record["name"]) for record in records
     ]
     return results
-
-def filter_products_with_ai(
-    synthetic_categories, text_search, min_price, max_price, min_rating, n=20
-):
-    df = read_data()
-
-    filtered_df = df[
-        (df["price"] >= min_price)
-        & (df["price"] <= max_price)
-        & (df["rating"] >= min_rating)
-        & (df["category"].isin(synthetic_categories))
-    ]
-
-    if text_search.strip():
-        closest_names_based_on_text_search = query_vector_index(
-            text_search, threshold=0.87
-        )
-        filtered_df = filtered_df[
-            filtered_df["name"].isin(closest_names_based_on_text_search)
-        ]
-
-    return [
-        (row["img"].split(";")[-1].strip(), row["name"])
-        for _, row in filtered_df.iterrows()
-    ][:n]
-
 
 def build_interface():
     df = read_data()
@@ -434,20 +328,17 @@ def build_interface():
                 min_rating_component,
             ]
             filter_button_component.click(
-                filter_products_with_ai_and_mongo, inputs=inputs, outputs=gallery
+                filter_products_with_ai_and_mongo_and_hybrid_search,
+                inputs=inputs,
+                outputs=gallery,
             )
             iface.load(
-                filter_products_with_ai_and_mongo,
+                filter_products_with_ai_and_mongo_and_hybrid_search,
                 inputs=inputs,
                 outputs=gallery,
             )
 
-    # Launch the interface
-    # iface.launch()
-    # iface.queue(max_size=20)
     return iface
 
 
 app = GradioServer.options(ray_actor_options={"num_cpus": 1}).bind(build_interface)
-# if __name__ == "__main__":
-#     iface = build_interface()
