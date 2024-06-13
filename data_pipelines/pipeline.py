@@ -320,8 +320,8 @@ if __name__ == "__main__":
         .map_groups(keep_first)
         .random_sample(frac, seed=42)
         .repartition(nsamples)
-        .map(update_record, concurrency=24, num_cpus=0.01)
-        .filter(not_missing_data, concurrency=24, num_cpus=0.01)
+        .map(update_record, concurrency=29, num_cpus=0.01)
+        .filter(not_missing_data, concurrency=29, num_cpus=0.01)
         .write_mongo(
             uri=os.environ["MONGODB_CONN_STR"],
             database="myDatabase",
