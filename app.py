@@ -1,4 +1,5 @@
 import math
+from typing import Optional
 import ray
 import gradio as gr
 import openai
@@ -90,16 +91,23 @@ def filter_products_mongo(keywords_str, min_price, max_price, min_rating, n=20):
 
 
 def filter_products_with_ai_and_mongo_and_hybrid_search(
-    synthetic_categories, text_search, min_price, max_price, min_rating, n=20
+    text_search: Optional[str],
+    min_price: int,
+    max_price: int,
+    min_rating: float,
+    synthetic_categories: list[str],
+    colors: list[str],
+    genders: list[str],
+    seasons: list[str],
+    n=20,
 ):
-    pipeline = []
     client = pymongo.MongoClient(
         # os.environ["MONGODB_CONN_STR"],
         "mongodb+srv://sarieddinemarwan:yLbV9diLKku0ieIm@mongodb-anyscale-demo-m.epezhiv.mongodb.net/?retryWrites=true&w=majority&appName=mongodb-anyscale-demo-marwan",
     )
     db = client.myDatabase
     collection = db["myntra-items"]
-    if text_search is not None:
+    if text_search.strip():
         embedding = compute_embedding(text_search)
         vector_penalty = 1
         full_text_penalty = 10
@@ -112,6 +120,17 @@ def filter_products_with_ai_and_mongo_and_hybrid_search(
                         "queryVector": embedding,
                         "numCandidates": 100,
                         "limit": 20,
+                    }
+                },
+                {
+                    # TODO - implement $match using pre-filters instead of a post-$search step
+                    "$match": {
+                        "price": {"$gte": min_price, "$lte": max_price},
+                        "rating": {"$gte": min_rating},
+                        "category": {"$in": synthetic_categories},
+                        "color": {"$in": colors},
+                        "season": {"$in": seasons},
+                        "gender": {"$in": genders},
                     }
                 },
                 {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
@@ -151,6 +170,9 @@ def filter_products_with_ai_and_mongo_and_hybrid_search(
                                     "price": {"$gte": min_price, "$lte": max_price},
                                     "rating": {"$gte": min_rating},
                                     "category": {"$in": synthetic_categories},
+                                    "color": {"$in": colors},
+                                    "season": {"$in": seasons},
+                                    "gender": {"$in": genders},
                                 }
                             },
                             {"$limit": 20},
@@ -214,15 +236,21 @@ def filter_products_with_ai_and_mongo_and_hybrid_search(
                         "price": {"$gte": min_price, "$lte": max_price},
                         "rating": {"$gte": min_rating},
                         "category": {"$in": synthetic_categories},
+                        "color": {"$in": colors},
+                        "season": {"$in": seasons},
+                        "gender": {"$in": genders},
                     }
                 },
                 {"$limit": n},
             ]
         )
+    results = list(records)
+    print(results)
     results = [
-        (record["img"].split(";")[-1].strip(), record["name"]) for record in records
+        (record["img"].split(";")[-1].strip(), record["name"]) for record in results
     ]
     return results
+
 
 def build_interface():
     df = read_data()
@@ -264,19 +292,22 @@ def build_interface():
                     min_rating_component = gr.Slider(
                         rating_min, rating_max, step=0.25, label="Min Rating"
                     )
+                    max_num_results_component = gr.Slider(
+                        1, 100, step=1, label="Max Results", value=20
+                    )
                     filter_button_component = gr.Button("Filter")
                 with gr.Column(scale=3):
                     gallery = gr.Gallery(
                         label="Filtered Products",
                         columns=3,
                         height=800,
-                        examples_per_page=10,
                     )
             inputs = [
                 keywords_component,
                 min_price_component,
                 max_price_component,
                 min_rating_component,
+                max_num_results_component,
             ]
             filter_button_component.click(
                 filter_products_mongo, inputs=inputs, outputs=gallery
@@ -301,6 +332,53 @@ def build_interface():
                             "Accessories",
                         ],
                     )
+                    gender_component = gr.CheckboxGroup(
+                        ["Male", "Female"],
+                        label="Gender",
+                        value=[
+                            "Male",
+                            "Female",
+                        ],
+                    )
+                    season_component = gr.CheckboxGroup(
+                        ["Summer", "Winter", "Spring", "Fall"],
+                        label="Season",
+                        value=[
+                            "Summer",
+                            "Winter",
+                            "Spring",
+                            "Fall",
+                        ],
+                    )
+                    color_component = gr.CheckboxGroup(
+                        [
+                            "Red",
+                            "Blue",
+                            "Green",
+                            "Yellow",
+                            "Black",
+                            "White",
+                            "Pink",
+                            "Purple",
+                            "Orange",
+                            "Brown",
+                            "Grey",
+                        ],
+                        label="Color",
+                        value=[
+                            "Red",
+                            "Blue",
+                            "Green",
+                            "Yellow",
+                            "Black",
+                            "White",
+                            "Pink",
+                            "Purple",
+                            "Orange",
+                            "Brown",
+                            "Grey",
+                        ],
+                    )
                     text_component = gr.Textbox(label="Text Search")
                     min_price_component = gr.Slider(
                         price_min, price_max, label="Min Price", value=price_min
@@ -312,6 +390,9 @@ def build_interface():
                     min_rating_component = gr.Slider(
                         rating_min, rating_max, step=0.25, label="Min Rating"
                     )
+                    max_num_results_component = gr.Slider(
+                        1, 100, step=1, label="Max Results", value=20
+                    )
                     filter_button_component = gr.Button("Filter")
                 with gr.Column(scale=3):
                     gallery = gr.Gallery(
@@ -321,11 +402,15 @@ def build_interface():
                         examples_per_page=10,
                     )
             inputs = [
-                synthetic_category_component,
                 text_component,
                 min_price_component,
                 max_price_component,
                 min_rating_component,
+                synthetic_category_component,
+                color_component,
+                gender_component,
+                season_component,
+                max_num_results_component,
             ]
             filter_button_component.click(
                 filter_products_with_ai_and_mongo_and_hybrid_search,
