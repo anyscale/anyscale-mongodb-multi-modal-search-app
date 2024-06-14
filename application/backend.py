@@ -24,7 +24,6 @@ class EmbeddingModel:
         return response.data[0].embedding
 
 
-
 @deployment
 class QueryLegacySearch:
     def __init__(
@@ -87,32 +86,32 @@ class QueryWithVectorSearch:
         embedding_model: DeploymentHandle,
         database_name: str = "myDatabase",
         collection_name: str = "myntra-items",
-        vector_penalty: int = 1,
-        full_text_penalty: int = 10,
     ) -> None:
         self.client = pymongo.MongoClient(os.environ["MONGODB_CONN_STR"])
         self.embedding_model = embedding_model
         self.database_name = database_name
         self.collection_name = collection_name
-        self.vector_penalty = vector_penalty
-        self.full_text_penalty = full_text_penalty
 
-    async def run (
+    async def run(
         self,
-        synthetic_categories: list[str],
-        text_search: Optional[str],
+        text_search: str,
         min_price: int,
         max_price: int,
         min_rating: float,
+        synthetic_categories: list[str],
+        colors: list[str],
+        seasons: list[str],
         n: int = 20,
         vector_search_index_name: str = "vector_index",
         vector_search_path: str = "description_embedding",
         text_search_index_name: str = "name-index-search",
+        vector_penalty: int = 1,
+        full_text_penalty: int = 10,
     ):
         db = self.client[self.database_name]
         collection = db[self.collection_name]
 
-        if text_search is not None:
+        if text_search.strip():
             embedding = await self.embedding_model.compute_embedding.remote(text_search)
             records = collection.aggregate(
                 [
@@ -122,7 +121,17 @@ class QueryWithVectorSearch:
                             "path": vector_search_path,
                             "queryVector": embedding,
                             "numCandidates": 100,
-                            "limit": n,
+                            "limit": 20,
+                        }
+                    },
+                    {
+                        # TODO - implement $match using pre-filters instead of a post-$search step
+                        "$match": {
+                            "price": {"$gte": min_price, "$lte": max_price},
+                            "rating": {"$gte": min_rating},
+                            "category": {"$in": synthetic_categories},
+                            "color": {"$in": colors},
+                            "season": {"$in": seasons},
                         }
                     },
                     {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
@@ -130,10 +139,7 @@ class QueryWithVectorSearch:
                     {
                         "$addFields": {
                             "vs_score": {
-                                "$divide": [
-                                    1.0,
-                                    {"$add": ["$rank", self.vector_penalty, 1]},
-                                ]
+                                "$divide": [1.0, {"$add": ["$rank", vector_penalty, 1]}]
                             }
                         }
                     },
@@ -165,9 +171,11 @@ class QueryWithVectorSearch:
                                         "price": {"$gte": min_price, "$lte": max_price},
                                         "rating": {"$gte": min_rating},
                                         "category": {"$in": synthetic_categories},
+                                        "color": {"$in": colors},
+                                        "season": {"$in": seasons},
                                     }
                                 },
-                                {"$limit": n},
+                                {"$limit": 20},
                                 {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
                                 {
                                     "$unwind": {
@@ -183,7 +191,7 @@ class QueryWithVectorSearch:
                                                 {
                                                     "$add": [
                                                         "$rank",
-                                                        self.full_text_penalty,
+                                                        full_text_penalty,
                                                         1,
                                                     ]
                                                 },
@@ -239,17 +247,21 @@ class QueryWithVectorSearch:
                             "price": {"$gte": min_price, "$lte": max_price},
                             "rating": {"$gte": min_rating},
                             "category": {"$in": synthetic_categories},
+                            "color": {"$in": colors},
+                            "season": {"$in": seasons},
                         }
                     },
                     {"$limit": n},
                 ]
             )
-        results = [
+
+        return [
             (record["img"].split(";")[-1].strip(), record["name"]) for record in records
         ]
-        return results
+
 
 fastapi = FastAPI()
+
 
 @deployment
 @ingress(fastapi)
@@ -266,28 +278,43 @@ class QueryApplication:
     @fastapi.get("/legacy")
     async def query_legacy_search(
         self,
-        text_search: Optional[str] = None,
-        min_price: int = 0,
-        max_price: int = 1000,
-        min_rating: float = 0,
-        n: int = 20,
+        text_search: str,
+        min_price: int,
+        max_price: int,
+        min_rating: float,
+        num_results: int,
     ):
-        return await self.query_legacy.run.remote(text_search, min_price, max_price, min_rating, n)
-    
+        return await self.query_legacy.run.remote(
+            text_search=text_search,
+            min_price=min_price,
+            max_price=max_price,
+            min_rating=min_rating,
+            n=num_results,
+        )
+
     @fastapi.get("/vector")
     async def query_vector_search(
         self,
+        text_search: str,
+        min_price: int,
+        max_price: int,
+        min_rating: float,
         synthetic_categories: list[str],
-        text_search: Optional[str] = None,
-        min_price: int = 0,
-        max_price: int = 1000,
-        min_rating: float = 0,
-        n: int = 20,
+        colors: list[str],
+        seasons: list[str],
+        num_results: int,
     ):
         return await self.query_with_vector_search.run.remote(
-            synthetic_categories, text_search, min_price, max_price, min_rating, n
+            text_search=text_search,
+            min_price=min_price,
+            max_price=max_price,
+            min_rating=min_rating,
+            synthetic_categories=synthetic_categories,
+            colors=colors,
+            seasons=seasons,
+            n=num_results,
         )
-    
+
 
 query_legacy = QueryLegacySearch.bind()
 embedding_model = EmbeddingModel.bind()

@@ -288,7 +288,7 @@ def reset_mongo_collection():
 if __name__ == "__main__":
 
     reset_mongo_collection()
-    nsamples = 1000
+    nsamples = 5_000
 
     ds = ray.data.read_csv(
         "/mnt/cluster_storage/myntra202305041052.csv",
