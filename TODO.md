@@ -1,0 +1,13 @@
+- pre-filter implementation on hybrid search
+- using motor instead of pymongo for async IO
+- figure out approach for delta-refresh
+	- ray.data.write_mongo doesn't support it
+- scaling to 100k records:
+	- write:
+		- move from public endpoints to vLLM based batch inference for:
+			- LlaVA, Llama, and embedding model
+		- understand how `write_mongo` currently works
+			- seems to be inserting 1 record at a time
+	- backend
+		- run embedding model
+		- dynamic request batching 
