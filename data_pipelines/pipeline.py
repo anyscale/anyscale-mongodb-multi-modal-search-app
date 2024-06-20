@@ -8,6 +8,8 @@ import pyarrow as pa
 import ray
 from openai import OpenAI
 from pyarrow import csv
+from pymongo import MongoClient, ASCENDING, DESCENDING
+from pymongo.operations import SearchIndexModel, IndexModel
 
 
 def query_embedding(
@@ -248,11 +250,93 @@ def keep_first(g):
     return {k: np.array([v[0]]) for k, v in g.items()}
 
 
-def reset_mongo_collection():
-    client: pymongo.MongoClient = pymongo.MongoClient(
-        os.environ["MONGODB_CONN_STR"],
+def setup_db():
+    """
+    Creates the following:
+
+    database: "myntra"
+        - collection: "myntra-items" with the following indices:
+            - An index on the "name" field with a standard lucene analyzer
+            - A vector index on the embedding fields
+            - Single field indices on the rest of the search fields
+    """
+    mongo_client = MongoClient(os.environ["DB_CONNECTION_STRING"])
+    db = mongo_client["myntra"]
+    db.drop_collection("myntra-items")
+    my_collection = db["myntra-items"]
+
+    my_collection.create_indexes(
+        [
+            IndexModel([("rating", DESCENDING)]),
+            IndexModel([("category", ASCENDING)]),
+            IndexModel([("season", ASCENDING)]),
+            IndexModel([("color", ASCENDING)]),
+        ]
     )
-    db = client.myDatabase
+
+    # TODO - uncomment when no longer running on m0 cluster
+    # my_collection.create_search_index(
+    #     {
+    #         "definition": {
+    #             "mappings": {
+    #                 "dynamic": False,
+    #                 "fields": {
+    #                     "name": {
+    #                         "type": "string",
+    #                         "analyzer": "lucene.standard",
+    #                     },
+    #                 },
+    #             }
+    #         },
+    #         "name": "lexical_text_search_index",
+    #     }
+    # )
+
+    # my_collection.create_search_index(
+    #     {
+    #         "definition": {
+    #             "mappings": {
+    #                 "dynamic": False,
+    #                 "fields": [
+    #                     {
+    #                         "numDimensions": 1024,
+    #                         "similarity": "cosine",
+    #                         "type": "vector",
+    #                         "path": "description_embedding",
+    #                     },
+    #                     {
+    #                         "type": "filter",
+    #                         "path": "category",
+    #                     },
+    #                     {
+    #                         "type": "filter",
+    #                         "path": "season",
+    #                     },
+    #                     {
+    #                         "type": "filter",
+    #                         "path": "color",
+    #                     },
+    #                     {
+    #                         "type": "filter",
+    #                         "path": "rating",
+    #                     },
+    #                     {
+    #                         "type": "filter",
+    #                         "path": "price",
+    #                     },
+    #                 ],
+    #             }
+    #         },
+    #         "name": "vector_search_index",
+    #     }
+    # )
+
+
+def clear_data_in_db():
+    mongo_client: pymongo.MongoClient = pymongo.MongoClient(
+        os.environ["DB_CONNECTION_STRING"],
+    )
+    db = mongo_client["myntra"]
     my_collection = db["myntra-items"]
     my_collection.delete_many({})
 
