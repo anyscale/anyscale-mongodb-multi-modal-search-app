@@ -48,14 +48,14 @@ def filter_products_with_ai(
         "colors": colors,
         "seasons": seasons,
     }
-    print(params)
+
     response = requests.get(
         f"{ANYSCALE_BACKEND_SERVICE_URL}/vector",
         params=params,
         json=body,
     )
     results = response.json()
-    print(results)
+
     return results
 
 
