@@ -1,27 +1,21 @@
 from typing import Optional
-import openai
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 from ray.serve import deployment, ingress
 from ray.serve.handle import DeploymentHandle
 from fastapi import FastAPI
+# from vllm import LLM
+from sentence_transformers import SentenceTransformer
 
 
 @deployment
 class EmbeddingModel:
     def __init__(self, model: str = "thenlper/gte-large") -> None:
-        self.client = openai.OpenAI(
-            base_url="https://api.endpoints.anyscale.com/v1",
-            api_key=os.environ["ANYSCALE_API_KEY"],
-        )
-        self.model = model
+        self.model = SentenceTransformer(model, device="mps")
 
     async def compute_embedding(self, text: str) -> list[float]:
-        response = self.client.embeddings.create(
-            input=text,
-            model=self.model,
-        )
-        return response.data[0].embedding
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self.model.encode(text))
 
 
 @deployment
