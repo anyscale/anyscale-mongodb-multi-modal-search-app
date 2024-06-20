@@ -1,14 +1,12 @@
 """Data pipeline to generate embeddings and metadata for Myntra items and store in mongodb."""
 
-import numpy as np
-import pandas as pd
-from openai import OpenAI
 from typing import Any, Optional
-import ray
-from openai import OpenAI
+import numpy as np
 import os
 import pymongo
 import pyarrow as pa
+import ray
+from openai import OpenAI
 from pyarrow import csv
 
 
