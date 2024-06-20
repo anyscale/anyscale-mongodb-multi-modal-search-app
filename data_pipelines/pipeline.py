@@ -341,13 +341,9 @@ def clear_data_in_db():
     my_collection.delete_many({})
 
 
-if __name__ == "__main__":
-
-    reset_mongo_collection()
-    nsamples = 5_000
-
+def read_data(path: str) -> ray.data.Dataset:
     ds = ray.data.read_csv(
-        "/mnt/cluster_storage/myntra202305041052.csv",
+        path,
         parse_options=csv.ParseOptions(newlines_in_values=True),
         convert_options=csv.ConvertOptions(
             column_types={
@@ -365,22 +361,46 @@ if __name__ == "__main__":
             }
         ),
     )
-    count = ds.count()
-    frac = nsamples / count
+    return ds
 
-    (
+
+def preprocess_and_sample_data(ds: ray.data.Dataset, nsamples: int) -> ray.data.Dataset:
+    ds_deduped = (
+        # remove rows missing values
         ds.filter(
             lambda x: all(x[k] is not None for k in ["name", "img", "price", "rating"])
         )
-        .groupby("name")
-        .map_groups(keep_first)
-        .random_sample(frac, seed=42)
-        .repartition(nsamples)
+        # drop duplicates on name
+        .groupby("name").map_groups(keep_first)
+    )
+
+    count = ds_deduped.count()
+    frac = nsamples / count
+    print(f"Sampling {frac=} of the data")
+
+    return ds_deduped.random_sample(frac, seed=42)
+
+
+def run_pipeline(path: str, nsamples: int):
+    ds = read_data(path)
+    ds = preprocess_and_sample_data(ds, nsamples)
+    (
+        ds.repartition(nsamples)
         .map(update_record, concurrency=29, num_cpus=0.01)
         .filter(not_missing_data, concurrency=29, num_cpus=0.01)
         .write_mongo(
-            uri=os.environ["MONGODB_CONN_STR"],
-            database="myDatabase",
+            uri=os.environ["DB_CONNECTION_STRING"],
+            database="myntra",
             collection="myntra-items",
         )
+    )
+
+
+if __name__ == "__main__":
+    print("Running pipeline")
+    # setup_db()
+    clear_data_in_db()
+    run_pipeline(
+        path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
+        nsamples=200,
     )
