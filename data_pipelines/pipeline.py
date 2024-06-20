@@ -136,29 +136,6 @@ def generate_category(title: str, description: str) -> Optional[str]:
     return None
 
 
-def generate_gender(title: str, description: str) -> Optional[str]:
-    genders = ["Male", "Female"]
-    genders_str = ", ".join(genders)
-    try:
-        gender = query_llama(
-            base_url="https://api.endpoints.anyscale.com/v1",
-            api_key="esecret_wvfv1x446u8ifxujuqkimm7wjw",
-            text=(
-                f"Given the title of this product: {title} and "
-                f"the description: {description}"
-                f"Chose from the following genders: {genders_str}. "
-                "Return the gender that best fits the product. Only return the gender name and nothing else."
-            ),
-        )
-    except Exception:
-        return None
-
-    if gender in genders:
-        return gender
-
-    return None
-
-
 def generate_season(title: str, description: str) -> Optional[str]:
     seasons = ["Summer", "Winter", "Spring", "Fall"]
     seasons_str = ", ".join(seasons)
@@ -237,13 +214,11 @@ def update_record(row: dict[str, Any]) -> dict[str, Any]:
     description = generate_description(text=name, image=last_img)
     if description is not None:
         category = generate_category(title=name, description=description)
-        gender = generate_gender(title=name, description=description)
         season = generate_season(title=name, description=description)
         color = generate_color(title=name, description=description)
         description_embedding = generate_embedding(description)
     else:
         category = None
-        gender = None
         season = None
         color = None
         description_embedding = None
@@ -256,7 +231,6 @@ def update_record(row: dict[str, Any]) -> dict[str, Any]:
         "rating": row["rating"],
         "description": description,
         "category": category,
-        "gender": gender,
         "season": season,
         "color": color,
         "name_embedding": name_embedding,
