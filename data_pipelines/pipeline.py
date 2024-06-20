@@ -105,7 +105,7 @@ def generate_description(text: str, image: str) -> Optional[str]:
     try:
         out = query_llava(
             base_url="https://api.endpoints.anyscale.com/v1",
-            api_key="esecret_wvfv1x446u8ifxujuqkimm7wjw",
+            api_key=os.environ["ANYSCALE_API_KEY"],
             text=f"Generate an ecommerce product description given the image and this title: {text}.",
             image_url=image,
         )
@@ -120,7 +120,7 @@ def generate_category(title: str, description: str) -> Optional[str]:
     try:
         category = query_llama(
             base_url="https://api.endpoints.anyscale.com/v1",
-            api_key="esecret_wvfv1x446u8ifxujuqkimm7wjw",
+            api_key=os.environ["ANYSCALE_API_KEY"],
             text=(
                 f"Given the title of this product: {title} and "
                 f"the description: {description}, what category does it belong to? "
@@ -144,7 +144,7 @@ def generate_season(title: str, description: str) -> Optional[str]:
     try:
         season = query_llama(
             base_url="https://api.endpoints.anyscale.com/v1",
-            api_key="esecret_wvfv1x446u8ifxujuqkimm7wjw",
+            api_key=os.environ["ANYSCALE_API_KEY"],
             text=(
                 f"Given the title of this product: {title} and "
                 f"the description: {description}"
@@ -179,7 +179,7 @@ def generate_color(title: str, description: str) -> Optional[str]:
     try:
         color = query_llama(
             base_url="https://api.endpoints.anyscale.com/v1",
-            api_key="esecret_wvfv1x446u8ifxujuqkimm7wjw",
+            api_key=os.environ["ANYSCALE_API_KEY"],
             text=(
                 f"Given the title of this product: {title} and "
                 f"the description: {description}"
@@ -200,7 +200,7 @@ def generate_embedding(text: str) -> Optional[list[float]]:
     try:
         out = query_embedding(
             base_url="https://api.endpoints.anyscale.com/v1",
-            api_key="esecret_wvfv1x446u8ifxujuqkimm7wjw",
+            api_key=os.environ["ANYSCALE_API_KEY"],
             text=text,
         )
     except Exception:
