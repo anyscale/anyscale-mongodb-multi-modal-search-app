@@ -28,10 +28,10 @@ class EmbeddingModel:
 class QueryLegacySearch:
     def __init__(
         self,
-        database_name: str = "myDatabase",
+        database_name: str = "myntra",
         collection_name: str = "myntra-items",
     ) -> None:
-        self.client = pymongo.MongoClient(os.environ["MONGODB_CONN_STR"])
+        self.client = pymongo.MongoClient(os.environ["DB_CONNECTION_STRING"])
         self.database_name = database_name
         self.collection_name = collection_name
 
@@ -84,10 +84,10 @@ class QueryWithVectorSearch:
     def __init__(
         self,
         embedding_model: DeploymentHandle,
-        database_name: str = "myDatabase",
+        database_name: str = "myntra",
         collection_name: str = "myntra-items",
     ) -> None:
-        self.client = pymongo.MongoClient(os.environ["MONGODB_CONN_STR"])
+        self.client = pymongo.MongoClient(os.environ["DB_CONNECTION_STRING"])
         self.embedding_model = embedding_model
         self.database_name = database_name
         self.collection_name = collection_name
