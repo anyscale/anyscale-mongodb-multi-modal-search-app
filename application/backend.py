@@ -1,9 +1,12 @@
+import asyncio
 from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import logging
 from ray.serve import deployment, ingress
 from ray.serve.handle import DeploymentHandle
 from fastapi import FastAPI
+
 # from vllm import LLM
 from sentence_transformers import SentenceTransformer
 
@@ -37,6 +40,9 @@ class QueryLegacySearch:
         min_rating: float,
         n: int = 20,
     ) -> list[tuple[str, str]]:
+        logger = logging.getLogger("ray.serve")
+        logger.setLevel(logging.DEBUG)
+
         db = self.client[self.database_name]
         collection = db[self.collection_name]
 
@@ -66,11 +72,18 @@ class QueryLegacySearch:
                 },
             ]
         )
+
+        logger.debug(f"Running pipeline: {pipeline}")
+
         records = collection.aggregate(pipeline)
         results = [
             (record["img"].split(";")[-1].strip(), record["name"])
             async for record in records
         ]
+
+        n_results = len(results)
+        logger.debug(f"Found {n_results=} results")
+
         return results
 
 
