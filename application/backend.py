@@ -1,6 +1,6 @@
 from typing import Optional
 import openai
-import pymongo
+from motor.motor_asyncio import AsyncIOMotorClient
 import os
 from ray.serve import deployment, ingress
 from ray.serve.handle import DeploymentHandle
@@ -31,7 +31,7 @@ class QueryLegacySearch:
         database_name: str = "myntra",
         collection_name: str = "myntra-items",
     ) -> None:
-        self.client = pymongo.MongoClient(os.environ["DB_CONNECTION_STRING"])
+        self.client = AsyncIOMotorClient(os.environ["DB_CONNECTION_STRING"])
         self.database_name = database_name
         self.collection_name = collection_name
 
@@ -74,7 +74,8 @@ class QueryLegacySearch:
         )
         records = collection.aggregate(pipeline)
         results = [
-            (record["img"].split(";")[-1].strip(), record["name"]) for record in records
+            (record["img"].split(";")[-1].strip(), record["name"])
+            async for record in records
         ]
         return results
 
@@ -87,7 +88,7 @@ class QueryWithVectorSearch:
         database_name: str = "myntra",
         collection_name: str = "myntra-items",
     ) -> None:
-        self.client = pymongo.MongoClient(os.environ["DB_CONNECTION_STRING"])
+        self.client = AsyncIOMotorClient(os.environ["DB_CONNECTION_STRING"])
         self.embedding_model = embedding_model
         self.database_name = database_name
         self.collection_name = collection_name
@@ -253,7 +254,8 @@ class QueryWithVectorSearch:
             )
 
         return [
-            (record["img"].split(";")[-1].strip(), record["name"]) for record in records
+            (record["img"].split(";")[-1].strip(), record["name"])
+            async for record in records
         ]
 
 
