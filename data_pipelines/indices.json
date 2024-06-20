@@ -1,0 +1,46 @@
+{
+    "lexical_text_search_index": {
+        "mappings": {
+            "dynamic": false,
+            "fields": {
+                "name": {
+                    "type": "string",
+                    "analyzer": "lucene.standard"
+                }
+            }
+        }
+    },
+    "vector_search_index": {
+        "mappings": {
+            "dynamic": false,
+            "fields": [
+                {
+                    "numDimensions": 1024,
+                    "similarity": "cosine",
+                    "type": "vector",
+                    "path": "description_embedding"
+                },
+                {
+                    "type": "filter",
+                    "path": "category"
+                },
+                {
+                    "type": "filter",
+                    "path": "season"
+                },
+                {
+                    "type": "filter",
+                    "path": "color"
+                },
+                {
+                    "type": "filter",
+                    "path": "rating"
+                },
+                {
+                    "type": "filter",
+                    "path": "price"
+                }
+            ]
+        }
+    }
+}
