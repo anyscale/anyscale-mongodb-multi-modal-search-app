@@ -6,9 +6,10 @@ import os
 import pymongo
 import pyarrow as pa
 import ray
+import pandas as pd
 from openai import OpenAI
 from pyarrow import csv
-from pymongo import MongoClient, ASCENDING, DESCENDING
+from pymongo import MongoClient, ASCENDING, DESCENDING, UpdateOne
 from pymongo.operations import SearchIndexModel, IndexModel
 
 
@@ -250,6 +251,37 @@ def keep_first(g):
     return {k: np.array([v[0]]) for k, v in g.items()}
 
 
+class MongoBulkUpdate:
+    def __init__(self, db: str, collection: str) -> None:
+        client = MongoClient(os.environ["DB_CONNECTION_STRING"])
+        self.collection = client[db][collection]
+
+    def __call__(self, batch_df: pd.DataFrame) -> dict[str, np.ndarray]:
+        # cast embedding columns from arrays to lists
+        for col in ["name_embedding", "description_embedding"]:
+            batch_df[col] = batch_df[col].apply(lambda x: x.tolist())
+        docs = batch_df.to_dict(orient="records")
+        bulk_ops = [
+            UpdateOne(filter={"_id": doc["_id"]}, update={"$set": doc}, upsert=True)
+            for doc in docs
+        ]
+        self.collection.bulk_write(bulk_ops)
+        return {}
+
+
+class MongoBulkInsert:
+    def __init__(self, db: str, collection: str) -> None:
+        client = MongoClient(os.environ["DB_CONNECTION_STRING"])
+        self.collection = client[db][collection]
+
+    def __call__(self, batch_df: pd.DataFrame) -> dict[str, np.ndarray]:
+        for col in ["name_embedding", "description_embedding"]:
+            batch_df[col] = batch_df[col].apply(lambda x: x.tolist())
+        docs = batch_df.to_dict(orient="records")
+        self.collection.insert_many(docs)
+        return {}
+
+
 def setup_db():
     """
     Creates the following:
@@ -382,24 +414,53 @@ def preprocess_and_sample_data(ds: ray.data.Dataset, nsamples: int) -> ray.data.
 
 
 def run_pipeline(path: str, nsamples: int):
+    ray.init(
+        # add env vars
+        runtime_env={
+            "env_vars": {
+                "ANYSCALE_API_KEY": os.environ["ANYSCALE_API_KEY"],
+                "DB_CONNECTION_STRING": os.environ["DB_CONNECTION_STRING"],
+            },
+        }
+    )
     ds = read_data(path)
     ds = preprocess_and_sample_data(ds, nsamples)
-    (
+    df = (
         ds.repartition(nsamples)
         .map(update_record, concurrency=29, num_cpus=0.01)
         .filter(not_missing_data, concurrency=29, num_cpus=0.01)
-        .write_mongo(
-            uri=os.environ["DB_CONNECTION_STRING"],
-            database="myntra",
-            collection="myntra-items",
+        # .write_mongo(
+        #     uri=os.environ["DB_CONNECTION_STRING"],
+        #     database="myntra",
+        #     collection="myntra-items",
+        # )
+        # .map_batches(
+        #     MongoBulkInsert,
+        #     fn_constructor_kwargs={"db": "myntra", "collection": "myntra-items"},
+        #     batch_size=1_000,
+        #     concurrency=10,
+        #     num_cpus=0.01,
+        #     zero_copy_batch=True,
+        # )
+        .map_batches(
+            MongoBulkUpdate,
+            fn_constructor_kwargs={"db": "myntra", "collection": "myntra-items"},
+            batch_size=10,
+            concurrency=10,
+            num_cpus=0.1,
+            zero_copy_batch=True,
+            batch_format="pandas",
         )
+        .materialize()
     )
+    print("Done")
+    print(df)
 
 
 if __name__ == "__main__":
     print("Running pipeline")
     # setup_db()
-    clear_data_in_db()
+    # clear_data_in_db()
     run_pipeline(
         path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
         nsamples=200,
