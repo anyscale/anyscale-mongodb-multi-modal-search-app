@@ -122,16 +122,13 @@ class QueryWithVectorSearch:
                             "queryVector": embedding,
                             "numCandidates": 100,
                             "limit": 20,
-                        }
-                    },
-                    {
-                        # TODO - implement $match using pre-filters instead of a post-$search step
-                        "$match": {
-                            "price": {"$gte": min_price, "$lte": max_price},
-                            "rating": {"$gte": min_rating},
-                            "category": {"$in": synthetic_categories},
-                            "color": {"$in": colors},
-                            "season": {"$in": seasons},
+                            "filter": {
+                                "price": {"$gte": min_price, "$lte": max_price},
+                                "rating": {"$gte": min_rating},
+                                "category": {"$in": synthetic_categories},
+                                "color": {"$in": colors},
+                                "season": {"$in": seasons},
+                            },
                         }
                     },
                     {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
