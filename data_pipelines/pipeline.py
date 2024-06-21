@@ -12,8 +12,12 @@ from pyarrow import csv
 from pymongo import MongoClient, ASCENDING, DESCENDING, UpdateOne
 from pymongo.operations import SearchIndexModel, IndexModel
 
+from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer
+from sentence_transformers import SentenceTransformer
 
-def query_embedding(
+
+def query_embedding_openai(
     base_url: str, api_key: str, text: str, retries: int = 6
 ) -> list[float]:
     client = OpenAI(
@@ -35,6 +39,25 @@ def query_embedding(
         break
 
     return response.data[0].embedding
+
+
+# BERT model not supported yet
+# class EmbedderVLLM:
+#     def __init__(self, model: str = "thenlper/gte-large"):
+#         self.model = LLM(model)
+
+#     def __call__(self, batch: dict[str, np.ndarray], col: str):
+#         batch[f"{col}_embedding"] = self.model(batch[col].tolist())
+#         return batch
+
+
+class EmbedderSentenceTransformer:
+    def __init__(self, model: str = "thenlper/gte-large"):
+        self.model = SentenceTransformer(model, device="cuda")
+
+    def __call__(self, batch: dict[str, np.ndarray], col: str):
+        batch[f"{col}_embedding"] = self.model.encode(batch[col].tolist())
+        return batch
 
 
 def query_llava(
@@ -74,7 +97,7 @@ def query_llava(
     return str(response.choices[0].message.content)
 
 
-def query_llama(base_url: str, api_key: str, text: str, retries: int = 6) -> str:
+def query_llama_openai(base_url: str, api_key: str, text: str, retries: int = 6) -> str:
     client = OpenAI(
         base_url=base_url,
         api_key=api_key,
@@ -102,7 +125,92 @@ def query_llama(base_url: str, api_key: str, text: str, retries: int = 6) -> str
     return str(response.choices[0].message.content)
 
 
-def generate_description(text: str, image: str) -> Optional[str]:
+class MistralTokenizer:
+    def __init__(self):
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "meta-llama/Llama-2-7b-chat-hf",
+        )
+
+    def __call__(self, row: dict, input: str, output: str):
+        row[output] = self.tokenizer.apply_chat_template(
+            conversation=[{"role": "user", "content": row[input]}],
+            add_generation_prompt=True,
+            tokenize=True,
+            return_tensors="np",
+        )
+        return row
+
+
+class MistralvLLM:
+    def __init__(self):
+        self.model = LLM(
+            model="meta-llama/Llama-2-7b-chat-hf",
+            max_model_len=16832,
+        )
+
+    def __call__(self, batch: dict[str, np.ndarray], input: str, output: str):
+        sampling_params = SamplingParams(
+            n=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            repetition_penalty=1,
+            length_penalty=1,
+            top_p=1,
+            top_k=-1,
+            temperature=0,
+            use_beam_search=False,
+            ignore_eos=False,
+            max_tokens=2048,
+            seed=None,
+            detokenize=False,
+        )
+
+        batch[output] = self.llm.generate(batch[input], sampling_params)
+        return batch
+
+
+class MistralDeTokenizer:
+    def __init__(self) -> None:
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "meta-llama/Llama-2-7b-chat-hf",
+        )
+
+    def __call__(self, row, output):
+        row[output] = self.tokenizer.decode(row[output])
+        return row
+
+
+def generate_category_prompt(row):
+    categories = ["Tops", "Bottoms", "Dresses", "Footwear", "Accessories"]
+    categories_str = ", ".join(categories)
+    title = row["title"]
+    description = row["description"]
+    row["gen_category_prompt"] = (
+        f"Given the title of this product: {title} and "
+        f"the description: {description}, what category does it belong to? "
+        f"Chose from the following categories: {categories_str}. "
+        "Return the category that best fits the product. Only return the category name and nothing else."
+    )
+    return row
+
+
+def generate_description(row):
+    text = row["title"]
+    image = row["image"]
+    try:
+        out = query_llava(
+            base_url="https://api.endpoints.anyscale.com/v1",
+            api_key=os.environ["ANYSCALE_API_KEY"],
+            text=f"Generate an ecommerce product description given the image and this title: {text}.",
+            image_url=image,
+        )
+    except Exception:
+        out = None
+    row["description"] = out
+    return row
+
+
+def generate_description_openai(text: str, image: str) -> Optional[str]:
     try:
         out = query_llava(
             base_url="https://api.endpoints.anyscale.com/v1",
@@ -119,7 +227,7 @@ def generate_category(title: str, description: str) -> Optional[str]:
     categories = ["Tops", "Bottoms", "Dresses", "Footwear", "Accessories"]
     categories_str = ", ".join(categories)
     try:
-        category = query_llama(
+        category = query_llama_openai(
             base_url="https://api.endpoints.anyscale.com/v1",
             api_key=os.environ["ANYSCALE_API_KEY"],
             text=(
@@ -143,7 +251,7 @@ def generate_season(title: str, description: str) -> Optional[str]:
     seasons = ["Summer", "Winter", "Spring", "Fall"]
     seasons_str = ", ".join(seasons)
     try:
-        season = query_llama(
+        season = query_llama_openai(
             base_url="https://api.endpoints.anyscale.com/v1",
             api_key=os.environ["ANYSCALE_API_KEY"],
             text=(
@@ -178,7 +286,7 @@ def generate_color(title: str, description: str) -> Optional[str]:
     ]
     colors_str = ", ".join(colors)
     try:
-        color = query_llama(
+        color = query_llama_openai(
             base_url="https://api.endpoints.anyscale.com/v1",
             api_key=os.environ["ANYSCALE_API_KEY"],
             text=(
@@ -199,7 +307,7 @@ def generate_color(title: str, description: str) -> Optional[str]:
 
 def generate_embedding(text: str) -> Optional[list[float]]:
     try:
-        out = query_embedding(
+        out = query_embedding_openai(
             base_url="https://api.endpoints.anyscale.com/v1",
             api_key=os.environ["ANYSCALE_API_KEY"],
             text=text,
@@ -214,17 +322,17 @@ def update_record(row: dict[str, Any]) -> dict[str, Any]:
     name = row["name"]
     name_embedding = generate_embedding(name)
 
-    description = generate_description(text=name, image=last_img)
+    description = generate_description_openai(text=name, image=last_img)
     if description is not None:
         category = generate_category(title=name, description=description)
-        season = generate_season(title=name, description=description)
-        color = generate_color(title=name, description=description)
-        description_embedding = generate_embedding(description)
+    #     season = generate_season(title=name, description=description)
+    #     color = generate_color(title=name, description=description)
+    #     description_embedding = generate_embedding(description)
     else:
         category = None
-        season = None
-        color = None
-        description_embedding = None
+    #     season = None
+    #     color = None
+    #     description_embedding = None
 
     return {
         "_id": name,
@@ -232,12 +340,12 @@ def update_record(row: dict[str, Any]) -> dict[str, Any]:
         "img": row["img"],
         "price": row["price"],
         "rating": row["rating"],
-        "description": description,
+        # "description": description,
         "category": category,
-        "season": season,
-        "color": color,
+        # "season": season,
+        # "color": color,
         "name_embedding": name_embedding,
-        "description_embedding": description_embedding,
+        # "description_embedding": description_embedding,
     }
 
 
@@ -410,7 +518,7 @@ def preprocess_and_sample_data(ds: ray.data.Dataset, nsamples: int) -> ray.data.
     frac = nsamples / count
     print(f"Sampling {frac=} of the data")
 
-    return ds_deduped.random_sample(frac, seed=42)
+    return ds_deduped.limit(nsamples)  # .random_sample(frac, seed=42)
 
 
 def run_pipeline(path: str, nsamples: int):
@@ -425,36 +533,86 @@ def run_pipeline(path: str, nsamples: int):
     )
     ds = read_data(path)
     ds = preprocess_and_sample_data(ds, nsamples)
-    df = (
-        ds.repartition(nsamples)
-        .map(update_record, concurrency=29, num_cpus=0.01)
-        .filter(not_missing_data, concurrency=29, num_cpus=0.01)
-        # .write_mongo(
-        #     uri=os.environ["DB_CONNECTION_STRING"],
-        #     database="myntra",
-        #     collection="myntra-items",
-        # )
-        # .map_batches(
-        #     MongoBulkInsert,
-        #     fn_constructor_kwargs={"db": "myntra", "collection": "myntra-items"},
-        #     batch_size=1_000,
-        #     concurrency=10,
-        #     num_cpus=0.01,
-        #     zero_copy_batch=True,
-        # )
-        .map_batches(
-            MongoBulkUpdate,
-            fn_constructor_kwargs={"db": "myntra", "collection": "myntra-items"},
-            batch_size=10,
-            concurrency=10,
-            num_cpus=0.1,
-            zero_copy_batch=True,
-            batch_format="pandas",
-        )
-        .materialize()
-    )
+
+    # (
+    #     ds.repartition(nsamples)
+    #     .map(update_record, concurrency=29, num_cpus=0.01)
+    #     .filter(not_missing_data, concurrency=29, num_cpus=0.01)
+    #     .write_parquet("/mnt/cluster_storage/openai_categories.parquet")
+    # )
+
+    #     # .write_mongo(
+    #     #     uri=os.environ["DB_CONNECTION_STRING"],
+    #     #     database="myntra",
+    #     #     collection="myntra-items",
+    #     # )
+    #     # .map_batches(
+    #     #     MongoBulkInsert,
+    #     #     fn_constructor_kwargs={"db": "myntra", "collection": "myntra-items"},
+    #     #     batch_size=1_000,
+    #     #     concurrency=10,
+    #     #     num_cpus=0.01,
+    #     #     zero_copy_batch=True,
+    #     # )
+    #     # .map_batches(
+    #     #     MongoBulkUpdate,
+    #     #     fn_constructor_kwargs={"db": "myntra", "collection": "myntra-items"},
+    #     #     batch_size=10,
+    #     #     concurrency=10,
+    #     #     num_cpus=0.1,
+    #     #     zero_copy_batch=True,
+    #     #     batch_format="pandas",
+    #     # )
+    #     # .materialize()
+    # )
     print("Done")
-    print(df)
+    # print(df)
+
+    (
+        ds.repartition(nsamples)
+        .map_batches(
+            EmbedderSentenceTransformer,
+            fn_kwargs={"col": "name"},
+            batch_size=10,
+            num_gpus=0.0001,
+            concurrency=1,
+        )
+        .map(generate_description)
+        .map_batches(
+            EmbedderSentenceTransformer,
+            fn_kwargs={"col": "description"},
+            batch_size=10,
+            num_gpus=0.0001,
+            concurrency=1,
+        )
+        .map(generate_category_prompt)
+        .map(
+            MistralTokenizer,
+            fn_kwargs={
+                "input": "gen_category_prompt",
+                "output": "gen_category_prompt_tokens",
+            },
+            concurrency=1,
+            num_cpus=1,
+        )
+        .map_batches(
+            MistralvLLM,
+            fn_kwargs={
+                "input": "gen_category_prompt_tokens",
+                "output": "gen_category_prompt_response",
+            },
+            batch_size=1,
+            num_gpus=1,
+            concurrency=1,
+        )
+        .map(
+            MistralDeTokenizer,
+            fn_kwargs={"output": "gen_category_prompt_response"},
+            concurrency=1,
+            num_cpus=1,
+        )
+        .write_parquet("/mnt/cluster_storage/vllm_categories.parquet")
+    )
 
 
 if __name__ == "__main__":
@@ -463,5 +621,5 @@ if __name__ == "__main__":
     # clear_data_in_db()
     run_pipeline(
         path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
-        nsamples=200,
+        nsamples=10,
     )
