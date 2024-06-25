@@ -15,6 +15,7 @@ from pymongo.operations import SearchIndexModel, IndexModel
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from sentence_transformers import SentenceTransformer
+from ray.util.accelerators import NVIDIA_TESLA_A10G
 
 
 def query_embedding_openai(
@@ -128,7 +129,7 @@ def query_llama_openai(base_url: str, api_key: str, text: str, retries: int = 6)
 class MistralTokenizer:
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained(
-            "meta-llama/Llama-2-7b-chat-hf",
+            "mistralai/Mistral-7B-Instruct-v0.1",
         )
 
     def __call__(self, row: dict, input: str, output: str):
@@ -143,9 +144,10 @@ class MistralTokenizer:
 
 class MistralvLLM:
     def __init__(self):
-        self.model = LLM(
-            model="meta-llama/Llama-2-7b-chat-hf",
-            max_model_len=16832,
+        self.llm = LLM(
+            model="mistralai/Mistral-7B-Instruct-v0.1",
+            max_model_len=4096,
+            skip_tokenizer_init=True,
         )
 
     def __call__(self, batch: dict[str, np.ndarray], input: str, output: str):
@@ -165,25 +167,25 @@ class MistralvLLM:
             detokenize=False,
         )
 
-        batch[output] = self.llm.generate(batch[input], sampling_params)
+        batch[output] = self.llm.generate(prompt_token_ids=batch[input].tolist(), sampling_params=sampling_params)
         return batch
 
 
 class MistralDeTokenizer:
     def __init__(self) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(
-            "meta-llama/Llama-2-7b-chat-hf",
+            "mistralai/Mistral-7B-Instruct-v0.1",
         )
 
-    def __call__(self, row, output):
-        row[output] = self.tokenizer.decode(row[output])
+    def __call__(self, row: dict[str, Any], key: str) -> dict[str, Any]:
+        row[key] = self.tokenizer.decode(row[key])
         return row
 
 
 def generate_category_prompt(row):
     categories = ["Tops", "Bottoms", "Dresses", "Footwear", "Accessories"]
     categories_str = ", ".join(categories)
-    title = row["title"]
+    title = row["name"]
     description = row["description"]
     row["gen_category_prompt"] = (
         f"Given the title of this product: {title} and "
@@ -195,8 +197,8 @@ def generate_category_prompt(row):
 
 
 def generate_description(row):
-    text = row["title"]
-    image = row["image"]
+    text = row["name"]
+    image = row["img"].split(";")[-1].strip()
     try:
         out = query_llava(
             base_url="https://api.endpoints.anyscale.com/v1",
@@ -574,16 +576,18 @@ def run_pipeline(path: str, nsamples: int):
             EmbedderSentenceTransformer,
             fn_kwargs={"col": "name"},
             batch_size=10,
-            num_gpus=0.0001,
+            num_gpus=4 / 32,  # 4 GB / 32 GB
             concurrency=1,
+            accelerator_type=NVIDIA_TESLA_A10G,
         )
         .map(generate_description)
         .map_batches(
             EmbedderSentenceTransformer,
             fn_kwargs={"col": "description"},
             batch_size=10,
-            num_gpus=0.0001,
+            num_gpus=4 / 32,  # 4 GB / 32 GB
             concurrency=1,
+            accelerator_type=NVIDIA_TESLA_A10G,
         )
         .map(generate_category_prompt)
         .map(
@@ -604,10 +608,11 @@ def run_pipeline(path: str, nsamples: int):
             batch_size=1,
             num_gpus=1,
             concurrency=1,
+            accelerator_type=NVIDIA_TESLA_A10G,
         )
         .map(
             MistralDeTokenizer,
-            fn_kwargs={"output": "gen_category_prompt_response"},
+            fn_kwargs={"key": "gen_category_prompt_response"},
             concurrency=1,
             num_cpus=1,
         )
@@ -619,7 +624,7 @@ if __name__ == "__main__":
     print("Running pipeline")
     # setup_db()
     # clear_data_in_db()
-    run_pipeline(
-        path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
-        nsamples=10,
-    )
+    # run_pipeline(
+    #     path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
+    #     nsamples=10,
+    # )
