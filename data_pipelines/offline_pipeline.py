@@ -53,11 +53,6 @@ def gen_description_prompt(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def keep_valid_images(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    batch["img"] = [img for img in batch["img"] if img]
-    return batch
-
-
 def download_image(url: str) -> np.ndarray:
     try:
         response = requests.get(url)
@@ -70,7 +65,7 @@ def download_image(url: str) -> np.ndarray:
 def download_images(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     with ThreadPoolExecutor() as executor:
         batch["img"] = list(executor.map(download_image, batch["img"]))
-    return keep_valid_images(batch)
+    return batch
 
 
 # download the image
@@ -135,9 +130,10 @@ class MistralTokenizer:
         row[output] = self.tokenizer.apply_chat_template(
             conversation=[{"role": "user", "content": row[input]}],
             add_generation_prompt=True,
-            tokenize=True,
+            tokenize=False,
             return_tensors="np",
-        ).squeeze()
+        )
+        row[output] = self.tokenizer(row[output], padding=True, truncation=True).squeeze()
         return row
 
 
@@ -164,9 +160,9 @@ class MistralvLLM:
             detokenize=False,
         )
 
-    def __call__(self, batch: dict[str, np.ndarray], input: str, output: str):
+    def __call__(self, batch: dict[str, np.ndarray], input: str, output: str) -> dict[str, np.ndarray]:
         responses = self.llm.generate(
-            prompt_token_ids=batch[input].tolist(), sampling_params=self.sampling_params
+            prompt_token_ids=[ids.tolist() for ids in batch[input]], sampling_params=self.sampling_params
         )
         batch[output] = np.array([resp.outputs[0].token_ids for resp in responses], dtype=np.int32)
         return batch
@@ -230,6 +226,18 @@ def construct_prompt_classifier(
     )
     return row
 
+def clean_response(row: dict[str, Any], response_col: str, classes: list[str]) -> str | None:
+    response_str = row[response_col]
+    matches = []
+    for class_ in classes:
+        if class_.lower() in response_str.lower():
+            matches.append(class_)
+    if len(matches) == 1:
+        response = matches[0]
+    else:
+        response = None
+    row[response_col] = response
+    return row
 
 classifiers: dict[str, Any] = {
     "category": {
@@ -491,25 +499,26 @@ def run_pipeline(path: str, nsamples: int):
         }
     )
 
-    ds = ray.data.read_parquet("/mnt/cluster_storage/offline_pipeline.parquet")
+    # ds = ray.data.read_parquet("/mnt/cluster_storage/offline_pipeline.parquet")
 
-    # ds = read_data(path)
+    ds = read_data(path)
 
-    # ds = preprocess_and_sample_data(ds, nsamples)
+    ds = preprocess_and_sample_data(ds, nsamples)
 
     # generate description using LLAVA model
-    # ds = (
-    #     ds.repartition(nsamples)
-    #     .map_batches(download_images, num_cpus=4)
-    #     .map(gen_description_prompt)
-    #     .map_batches(
-    #         LlaVAMistral,
-    #         batch_size=1,
-    #         num_gpus=1,
-    #         concurrency=1,
-    #         accelerator_type=NVIDIA_TESLA_A10G,
-    #     )
-    # )
+    ds = (
+        ds.repartition(nsamples)
+        .map_batches(download_images, num_cpus=4)
+        .filter(lambda x: bool(x["img"]))
+        .map(gen_description_prompt)
+        .map_batches(
+            LlaVAMistral,
+            batch_size=1,
+            num_gpus=1,
+            concurrency=1,
+            accelerator_type=NVIDIA_TESLA_A10G,
+        )
+    )
 
     # # generate embeddings
     # ds = (
@@ -552,7 +561,7 @@ def run_pipeline(path: str, nsamples: int):
                 # fn_constructor_kwargs={
                 #     "max_model_len": max_tokens,
                 # },
-                batch_size=1,
+                batch_size=10,
                 num_gpus=1,
                 concurrency=1,
                 accelerator_type=NVIDIA_TESLA_A10G,
@@ -562,62 +571,27 @@ def run_pipeline(path: str, nsamples: int):
                 fn_kwargs={"key": f"{classifier}_response"},
                 concurrency=1,
                 num_cpus=1,
-            ).materialize()
+            ).map(
+                clean_response,
+                fn_kwargs={
+                    "classes": classifier_spec["classes"],
+                    "response_col": f"{classifier}_response",
+                }
+            )
+            .materialize()
+            .sort("name")
         )
 
-
-        ds_map[classifier] = ds_map[classifier].sort("name")
-
+        # join the prompt responses
         if idx == 0:
             ds = ds_map[classifier]
 
         else:
             ds = ds.zip(ds_map[classifier].select_columns([f"{classifier}_response"]))
 
-    # # generate synthetic classes
-    # for max_tokens, synthetic_col, prompt_gen_func in [
-    #     ("category", generate_category_prompt, max_tokens_category_prompt),
-    #     ("season", generate_season_prompt, max_tokens_season_prompt),
-    #     ("color", generate_color_prompt, max_tokens_color_prompt)
-    #     ]:
-    #     ds = (
-    #         ds
-    #         .map(prompt_gen_func, fn_kwargs={"col":synthetic_col})
-    #         .map(
-    #             MistralTokenizer,
-    #             fn_kwargs={
-    #                 "input": "prompt",
-    #                 "output": "prompt_tokens",
-    #             },
-    #             concurrency=1,
-    #             num_cpus=1,
-    #         )
-    #         .map_batches(
-    #             MistralvLLM,
-    #             fn_kwargs={
-    #                 "input": "prompt_tokens",
-    #                 "output": "prompt_response",
-    #             },
-    #             fn_constructor_kwargs={
-    #                 "max_model_len": max_tokens,
-    #             }
-    #             batch_size=1,
-    #             num_gpus=1,
-    #             concurrency=1,
-    #             accelerator_type=NVIDIA_TESLA_A10G,
-    #         )
-    #         .map(
-    #             MistralDeTokenizer,
-    #             fn_kwargs={"key": "prompt_response"},
-    #             concurrency=1,
-    #             num_cpus=1,
-    #         )
-    #     )
-
-    # # join the prompt responses
 
     # write out to db
-    ds.write_parquet("/mnt/cluster_storage/offline_pipeline_2.parquet")
+    ds.write_parquet("/mnt/cluster_storage/offline_pipeline_3.parquet")
 
 
 if __name__ == "__main__":
