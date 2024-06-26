@@ -138,7 +138,7 @@ class MistralTokenizer:
             add_generation_prompt=True,
             tokenize=True,
             return_tensors="np",
-        )
+        ).squeeze()
         return row
 
 
@@ -167,7 +167,9 @@ class MistralvLLM:
             detokenize=False,
         )
 
-        batch[output] = self.llm.generate(prompt_token_ids=batch[input].tolist(), sampling_params=sampling_params)
+        response = self.llm.generate(prompt_token_ids=batch[input].tolist(), sampling_params=sampling_params)[0]
+        batch[output] = np.array(response.outputs[0].token_ids, dtype=np.int32)
+
         return batch
 
 
@@ -624,7 +626,7 @@ if __name__ == "__main__":
     print("Running pipeline")
     # setup_db()
     # clear_data_in_db()
-    # run_pipeline(
-    #     path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
-    #     nsamples=10,
-    # )
+    run_pipeline(
+        path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
+        nsamples=10,
+    )
