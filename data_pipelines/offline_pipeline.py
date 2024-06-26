@@ -34,21 +34,27 @@ class EmbedderSentenceTransformer:
     def __init__(self, model: str = "thenlper/gte-large"):
         self.model = SentenceTransformer(model, device="cuda")
 
-    def __call__(self, batch: dict[str, np.ndarray], cols: list[str]) -> dict[str, np.ndarray]:
+    def __call__(
+        self, batch: dict[str, np.ndarray], cols: list[str]
+    ) -> dict[str, np.ndarray]:
         for col in cols:
             batch[f"{col}_embedding"] = self.model.encode(batch[col].tolist())
         return batch
 
+
 def gen_description_prompt(row: dict[str, Any]) -> dict[str, Any]:
     title = row["name"]
     row["description_prompt"] = "<image>" * 1176 + (
-        f"Generate an ecommerce product description given the image and this title: {title}."
+        f"\nUSER: Generate an ecommerce product description given the image and this title: {title}.\nASSISTANT:"
     )
+
     return row
 
+
 def keep_valid_images(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    batch["image"] = [img for img in batch["image"] if img]
+    batch["img"] = [img for img in batch["img"] if img]
     return batch
+
 
 def download_image(url: str) -> np.ndarray:
     try:
@@ -56,12 +62,14 @@ def download_image(url: str) -> np.ndarray:
         response.raise_for_status()
         return response.content
     except Exception:
-        return b""    
+        return b""
+
 
 def download_images(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     with ThreadPoolExecutor() as executor:
         batch["img"] = list(executor.map(download_image, batch["img"]))
     return keep_valid_images(batch)
+
 
 # download the image
 # pass the image to the LlaVA model
@@ -80,21 +88,40 @@ class LlaVAMistral:
                 "image_input_shape": "1,3,336,336",
                 "image_feature_size": 1176,
                 "enforce_eager": True,
-            }
+            },
+        )
+        self.sampling_params = SamplingParams(
+            n=1,
+            presence_penalty=0,
+            frequency_penalty=0,
+            repetition_penalty=1,
+            length_penalty=1,
+            top_p=1,
+            top_k=-1,
+            temperature=0,
+            use_beam_search=False,
+            ignore_eos=False,
+            max_tokens=2048,
+            seed=None,
+            detokenize=True,
         )
 
-    def __call__(self, batch: dict[str, np.ndarray], col: str):
+    def __call__(self, batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         prompts = batch["description_prompt"]
         images = [Image.open(io.BytesIO(img)) for img in batch["img"]]
-        batch["description"] = [
-            self.llm.generate(
-            {
-                "prompt": prompt,
-                "multi_modal_data": ImagePixelData(image),
-            }
-            )for prompt, image in zip(prompts, images)
-        ]
+        responses = []
+        for prompt, image in zip(prompts, images):
+            resp = self.llm.generate(
+                {
+                    "prompt": prompt,
+                    "multi_modal_data": ImagePixelData(image),
+                },
+                sampling_params=self.sampling_params,
+            )
+            responses.append(resp[0].outputs[0].text)
+        batch["description"] = responses
         return batch
+
 
 class MistralTokenizer:
     def __init__(self):
@@ -136,7 +163,9 @@ class MistralvLLM:
         )
 
     def __call__(self, batch: dict[str, np.ndarray], input: str, output: str):
-        response = self.llm.generate(prompt_token_ids=batch[input].tolist(), sampling_params=self.sampling_params)[0]
+        response = self.llm.generate(
+            prompt_token_ids=batch[input].tolist(), sampling_params=self.sampling_params
+        )[0]
         batch[output] = np.array(response.outputs[0].token_ids, dtype=np.int32)
         return batch
 
@@ -157,12 +186,16 @@ class BaseClassifierPromptConstructor:
     def max_class_len(self) -> int:
         return len(max(self.classes, key=len))
 
-    def compute_max_length_words(self, max_title_len: int, max_description_len: int) -> int:
-        max_input =  len(self.prompt_template.format(
-            title="x" * max_title_len,
-            description="x" * max_description_len,
-            classes_str=", ".join(self.classes),
-        ))
+    def compute_max_length_words(
+        self, max_title_len: int, max_description_len: int
+    ) -> int:
+        max_input = len(
+            self.prompt_template.format(
+                title="x" * max_title_len,
+                description="x" * max_description_len,
+                classes_str=", ".join(self.classes),
+            )
+        )
         max_output = self.max_class_len
         return max_input + max_output
 
@@ -177,6 +210,7 @@ class BaseClassifierPromptConstructor:
         )
         return row
 
+
 class CategoryPromptConstructor(BaseClassifierPromptConstructor):
     classes: list[str] = ["Tops", "Bottoms", "Dresses", "Footwear", "Accessories"]
     prompt_template: str = (
@@ -185,7 +219,8 @@ class CategoryPromptConstructor(BaseClassifierPromptConstructor):
         "Chose from the following categories: {classes_str}. "
         "Return the category that best fits the product. Only return the category name and nothing else."
     )
-    
+
+
 class SeasonPromptConstructor(BaseClassifierPromptConstructor):
     classes: list[str] = ["Summer", "Winter", "Spring", "Fall"]
     prompt_template: str = (
@@ -194,6 +229,7 @@ class SeasonPromptConstructor(BaseClassifierPromptConstructor):
         "Chose from the following seasons: {classes_str}. "
         "Return the season that best fits the product. Only return the season name and nothing else."
     )
+
 
 class ColorPromptConstructor(BaseClassifierPromptConstructor):
     classes: list[str] = [
@@ -391,7 +427,6 @@ def preprocess_and_sample_data(ds: ray.data.Dataset, nsamples: int) -> ray.data.
 
 def run_pipeline(path: str, nsamples: int):
     ray.init(
-        # add env vars
         runtime_env={
             "env_vars": {
                 "ANYSCALE_API_KEY": os.environ["ANYSCALE_API_KEY"],
@@ -409,9 +444,9 @@ def run_pipeline(path: str, nsamples: int):
         .map(gen_description_prompt)
         .map_batches(
             LlaVAMistral,
-            fn_kwargs={"col": "description"},
             batch_size=1,
             num_gpus=1,
+            concurrency=1,
             accelerator_type=NVIDIA_TESLA_A10G,
         )
     )
@@ -467,9 +502,8 @@ def run_pipeline(path: str, nsamples: int):
     #             num_cpus=1,
     #         )
     #     )
-    
-    # # join the prompt responses
 
+    # # join the prompt responses
 
     # write out to db
     ds.write_parquet("/mnt/cluster_storage/offline_pipeline.parquet")
