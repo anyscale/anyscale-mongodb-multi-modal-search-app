@@ -200,9 +200,10 @@ class BaseClassifierPromptConstructor:
         return max_input + max_output
 
     def __call__(self, row):
-        classes_str = ", ".join(self.classes_str)
+        classes_str = ", ".join(self.classes)
         title = row["name"]
         description = row["description"]
+        print(f"running classifier with {title=} {description=}")
         row["prompt"] = self.prompt_template.format(
             title=title,
             description=description,
@@ -211,14 +212,67 @@ class BaseClassifierPromptConstructor:
         return row
 
 
-class CategoryPromptConstructor(BaseClassifierPromptConstructor):
-    classes: list[str] = ["Tops", "Bottoms", "Dresses", "Footwear", "Accessories"]
-    prompt_template: str = (
-        "Given the title of this product: {title} and "
-        "the description: {description}, what category does it belong to? "
-        "Chose from the following categories: {classes_str}. "
-        "Return the category that best fits the product. Only return the category name and nothing else."
+def construct_prompt_classifier(
+    row: dict[str, Any],
+    prompt_template: str,
+    classes: list[str],
+    col: str,
+) -> dict[str, Any]:
+    classes_str = ", ".join(classes)
+    title = row["name"]
+    description = row["description"]
+    row[f"{col}_prompt"] = prompt_template.format(
+        title=title,
+        description=description,
+        classes_str=classes_str,
     )
+    return row
+
+
+classifiers: dict[str, Any] = {
+    "category": {
+        "classes": ["Tops", "Bottoms", "Dresses", "Footwear", "Accessories"],
+        "prompt_template": (
+            "Given the title of this product: {title} and "
+            "the description: {description}, what category does it belong to? "
+            "Chose from the following categories: {classes_str}. "
+            "Return the category that best fits the product. Only return the category name and nothing else."
+        ),
+        "prompt_constructor": construct_prompt_classifier,
+    },
+    "season": {
+        "classes": ["Summer", "Winter", "Spring", "Fall"],
+        "prompt_template": (
+            "Given the title of this product: {title} and "
+            "the description: {description}, what season does it belong to? "
+            "Chose from the following seasons: {classes_str}. "
+            "Return the season that best fits the product. Only return the season name and nothing else."
+        ),
+        "prompt_constructor": construct_prompt_classifier,
+    },
+    "color": {
+        "classes": [
+            "Red",
+            "Blue",
+            "Green",
+            "Yellow",
+            "Black",
+            "White",
+            "Pink",
+            "Purple",
+            "Orange",
+            "Brown",
+            "Grey",
+        ],
+        "prompt_template": (
+            "Given the title of this product: {title} and "
+            "the description: {description}, what color does it belong to? "
+            "Chose from the following colors: {classes_str}. "
+            "Return the color that best fits the product. Only return the color name and nothing else."
+        ),
+        "prompt_constructor": construct_prompt_classifier,
+    },
+}
 
 
 class SeasonPromptConstructor(BaseClassifierPromptConstructor):
@@ -434,25 +488,29 @@ def run_pipeline(path: str, nsamples: int):
             },
         }
     )
-    ds = read_data(path)
-    ds = preprocess_and_sample_data(ds, nsamples)
+
+    ds = ray.data.read_parquet("/mnt/cluster_storage/offline_pipeline.parquet")
+
+    # ds = read_data(path)
+
+    # ds = preprocess_and_sample_data(ds, nsamples)
 
     # generate description using LLAVA model
-    ds = (
-        ds.repartition(nsamples)
-        .map_batches(download_images, num_cpus=4)
-        .map(gen_description_prompt)
-        .map_batches(
-            LlaVAMistral,
-            batch_size=1,
-            num_gpus=1,
-            concurrency=1,
-            accelerator_type=NVIDIA_TESLA_A10G,
-        )
-    )
+    # ds = (
+    #     ds.repartition(nsamples)
+    #     .map_batches(download_images, num_cpus=4)
+    #     .map(gen_description_prompt)
+    #     .map_batches(
+    #         LlaVAMistral,
+    #         batch_size=1,
+    #         num_gpus=1,
+    #         concurrency=1,
+    #         accelerator_type=NVIDIA_TESLA_A10G,
+    #     )
+    # )
 
     # # generate embeddings
-    # (
+    # ds = (
     #     ds.map_batches(
     #         EmbedderSentenceTransformer,
     #         fn_kwargs={"cols": ["name", "description"]},
@@ -462,6 +520,54 @@ def run_pipeline(path: str, nsamples: int):
     #         accelerator_type=NVIDIA_TESLA_A10G,
     #     )
     # )
+
+    ds_map = {}
+    for idx, (classifier, classifier_spec) in enumerate(classifiers.items()):
+        ds_map[classifier] = (
+            ds.map(
+                classifier_spec["prompt_constructor"],
+                fn_kwargs={
+                    "prompt_template": classifier_spec["prompt_template"],
+                    "classes": classifier_spec["classes"],
+                    "col": classifier,
+                },
+            )
+            .map(
+                MistralTokenizer,
+                fn_kwargs={
+                    "input": f"{classifier}_prompt",
+                    "output": f"{classifier}_prompt_tokens",
+                },
+                concurrency=1,
+                num_cpus=1,
+            )
+            .map_batches(
+                MistralvLLM,
+                fn_kwargs={
+                    "input": f"{classifier}_prompt_tokens",
+                    "output": f"{classifier}_response",
+                },
+                # fn_constructor_kwargs={
+                #     "max_model_len": max_tokens,
+                # },
+                batch_size=1,
+                num_gpus=1,
+                concurrency=1,
+                accelerator_type=NVIDIA_TESLA_A10G,
+            )
+            .map(
+                MistralDeTokenizer,
+                fn_kwargs={"key": f"{classifier}_response"},
+                concurrency=1,
+                num_cpus=1,
+            )
+            .sort("name")
+        )
+        if idx == 0:
+            ds = ds_map[classifier]
+
+        else:
+            ds = ds.zip(ds_map[classifier].select_columns([f"{classifier}_response"]))
 
     # # generate synthetic classes
     # for max_tokens, synthetic_col, prompt_gen_func in [
@@ -506,7 +612,7 @@ def run_pipeline(path: str, nsamples: int):
     # # join the prompt responses
 
     # write out to db
-    ds.write_parquet("/mnt/cluster_storage/offline_pipeline.parquet")
+    ds.write_parquet("/mnt/cluster_storage/offline_pipeline_2.parquet")
 
 
 if __name__ == "__main__":
