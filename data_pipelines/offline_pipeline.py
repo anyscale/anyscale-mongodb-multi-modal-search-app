@@ -45,7 +45,9 @@ class EmbedderSentenceTransformer:
 def gen_description_prompt(row: dict[str, Any]) -> dict[str, Any]:
     title = row["name"]
     row["description_prompt"] = "<image>" * 1176 + (
-        f"\nUSER: Generate an ecommerce product description given the image and this title: {title}.\nASSISTANT:"
+        f"\nUSER: Generate an ecommerce product description given the image and this title: {title}."
+        "Make sure to include information about the color of the product in the description."
+        "\nASSISTANT:"
     )
 
     return row
@@ -163,10 +165,10 @@ class MistralvLLM:
         )
 
     def __call__(self, batch: dict[str, np.ndarray], input: str, output: str):
-        response = self.llm.generate(
+        responses = self.llm.generate(
             prompt_token_ids=batch[input].tolist(), sampling_params=self.sampling_params
-        )[0]
-        batch[output] = np.array(response.outputs[0].token_ids, dtype=np.int32)
+        )
+        batch[output] = np.array([resp.outputs[0].token_ids for resp in responses], dtype=np.int32)
         return batch
 
 
@@ -560,9 +562,12 @@ def run_pipeline(path: str, nsamples: int):
                 fn_kwargs={"key": f"{classifier}_response"},
                 concurrency=1,
                 num_cpus=1,
-            )
-            .sort("name")
+            ).materialize()
         )
+
+
+        ds_map[classifier] = ds_map[classifier].sort("name")
+
         if idx == 0:
             ds = ds_map[classifier]
 
