@@ -280,8 +280,6 @@ class MongoBulkUpdate:
     def __call__(self, batch_df: pd.DataFrame) -> dict[str, np.ndarray]:
         # cast embedding columns from arrays to lists
         for col in ["name_embedding", "description_embedding"]:
-            if col not in batch_df:
-                continue
             batch_df[col] = batch_df[col].apply(lambda x: x.tolist())
         docs = batch_df.to_dict(orient="records")
         bulk_ops = [
@@ -447,10 +445,10 @@ def update_record(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         "rating": batch["rating"],
         "description": batch["description"],
         "category": batch["category_response"],
-        # season
-        # color
-        # name_embedding
-        # description_embedding
+        "season": batch["season_response"],
+        "color": batch["color_response"],
+        "name_embedding": batch["name_embedding"],
+        "description_embedding": batch["description_embedding"],
     }
 
 
@@ -486,16 +484,16 @@ def run_pipeline(path: str, nsamples: int):
     )
 
     # # generate embeddings
-    # ds = (
-    #     ds.map_batches(
-    #         EmbedderSentenceTransformer,
-    #         fn_kwargs={"cols": ["name", "description"]},
-    #         batch_size=10,
-    #         num_gpus=4 / 32,  # 4 GB / 32 GB
-    #         concurrency=1,
-    #         accelerator_type=NVIDIA_TESLA_A10G,
-    #     )
-    # )
+    ds = (
+        ds.map_batches(
+            EmbedderSentenceTransformer,
+            fn_kwargs={"cols": ["name", "description"]},
+            batch_size=10,
+            num_gpus=4 / 32,  # 4 GB / 32 GB
+            concurrency=1,
+            accelerator_type=NVIDIA_TESLA_A10G,
+        )
+    )
 
     ds_map = {}
     for idx, (classifier, classifier_spec) in enumerate(classifiers.items()):
@@ -577,7 +575,7 @@ def run_pipeline(path: str, nsamples: int):
 
 if __name__ == "__main__":
     print("Running pipeline")
-    setup_db()
+    # setup_db()
     # clear_data_in_db()
     run_pipeline(
         path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
