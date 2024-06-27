@@ -86,7 +86,7 @@ class LlaVAMistral:
                 "image_token_id": 32000,
                 "image_input_shape": "1,3,336,336",
                 "image_feature_size": 1176,
-                "enforce_eager": True,
+                # "enforce_eager": True,
             },
         )
         self.sampling_params = SamplingParams(
@@ -100,7 +100,7 @@ class LlaVAMistral:
             temperature=0,
             use_beam_search=False,
             ignore_eos=False,
-            max_tokens=2048,
+            max_tokens=1024,
             seed=None,
             detokenize=True,
         )
@@ -108,17 +108,18 @@ class LlaVAMistral:
     def __call__(self, batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         prompts = batch["description_prompt"]
         images = [Image.open(io.BytesIO(img)) for img in batch["img"]]
-        responses = []
-        for prompt, image in zip(prompts, images):
-            resp = self.llm.generate(
+        responses = self.llm.generate(
+            [
                 {
                     "prompt": prompt,
                     "multi_modal_data": ImagePixelData(image),
-                },
-                sampling_params=self.sampling_params,
-            )
-            responses.append(resp[0].outputs[0].text)
-        batch["description"] = responses  # type: ignore
+                }
+                for prompt, image in zip(prompts, images)
+            ],
+            sampling_params=self.sampling_params,
+        )
+
+        batch["description"] = [resp.outputs[0].text for resp in responses] # type: ignore
         return batch
 
 
@@ -440,7 +441,7 @@ def update_record(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {
         "_id": batch["_id"],
         "name": batch["name"],
-        "img": batch["img"], # Does img need to remain as a URL ?
+        "img": batch["img"],  # Does img need to remain as a URL ?
         "price": batch["price"],
         "rating": batch["rating"],
         "description": batch["description"],
@@ -483,15 +484,13 @@ def run_pipeline(path: str, nsamples: int):
     )
 
     # generate embeddings
-    ds = (
-        ds.map_batches(
-            EmbedderSentenceTransformer,
-            fn_kwargs={"cols": ["name", "description"]},
-            batch_size=5,
-            num_gpus=1,
-            concurrency=1,
-            accelerator_type=NVIDIA_TESLA_A10G,
-        )
+    ds = ds.map_batches(
+        EmbedderSentenceTransformer,
+        fn_kwargs={"cols": ["name", "description"]},
+        batch_size=5,
+        num_gpus=1,
+        concurrency=1,
+        accelerator_type=NVIDIA_TESLA_A10G,
     )
 
     # ds_map = {}
@@ -544,7 +543,7 @@ def run_pipeline(path: str, nsamples: int):
             )
             # .drop_columns([f"{classifier}_prompt_tokens"])
         )
-    
+
     # for idx, (classifier, classifier_spec) in enumerate(classifiers.items()):
     #     # join the prompt responses
     #     if idx == 0:
@@ -576,7 +575,7 @@ if __name__ == "__main__":
     # setup_db()
     # clear_data_in_db()
     ctx = ray.data.DataContext.get_current()
-    ctx.target_min_block_size = 1 # 1 byte
+    ctx.target_min_block_size = 1  # 1 byte
 
     run_pipeline(
         path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset_deduped_100.csv",
