@@ -79,8 +79,8 @@ class LlaVAMistral:
             **{
                 "trust_remote_code": True,
                 "enable_lora": False,
-                "max_num_seqs": 1,
-                "max_model_len": 14224,
+                "max_num_seqs": 5,
+                "max_model_len": 2844,
                 "gpu_memory_utilization": 0.85,
                 "image_input_type": "pixel_values",
                 "image_token_id": 32000,
@@ -277,17 +277,16 @@ class MongoBulkUpdate:
         client = MongoClient(os.environ["DB_CONNECTION_STRING"])
         self.collection = client[db][collection]
 
-    def __call__(self, batch_df: pd.DataFrame) -> dict[str, np.ndarray]:
+    def __call__(self, batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         # cast embedding columns from arrays to lists
-        for col in ["name_embedding", "description_embedding"]:
-            batch_df[col] = batch_df[col].apply(lambda x: x.tolist())
+        batch_df = pd.DataFrame(batch)
         docs = batch_df.to_dict(orient="records")
         bulk_ops = [
             UpdateOne(filter={"_id": doc["_id"]}, update={"$set": doc}, upsert=True)
             for doc in docs
         ]
         self.collection.bulk_write(bulk_ops)
-        return {}
+        return batch
 
 
 class MongoBulkInsert:
@@ -394,7 +393,7 @@ def clear_data_in_db():
     my_collection.delete_many({})
 
 
-def read_data(path: str) -> ray.data.Dataset:
+def read_data(path: str, nsamples: int) -> ray.data.Dataset:
     ds = ray.data.read_csv(
         path,
         parse_options=csv.ParseOptions(newlines_in_values=True),
@@ -413,6 +412,7 @@ def read_data(path: str) -> ray.data.Dataset:
                 "purl": pa.string(),
             }
         ),
+        override_num_blocks=nsamples,
     )
     return ds
 
@@ -447,57 +447,57 @@ def update_record(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         "category": batch["category_response"],
         "season": batch["season_response"],
         "color": batch["color_response"],
-        "name_embedding": batch["name_embedding"],
-        "description_embedding": batch["description_embedding"],
+        "name_embedding": batch["name_embedding"].tolist(),
+        "description_embedding": batch["description_embedding"].tolist(),
     }
 
 
 def run_pipeline(path: str, nsamples: int):
-    ray.init(
-        runtime_env={
-            "env_vars": {
-                "ANYSCALE_API_KEY": os.environ["ANYSCALE_API_KEY"],
-                "DB_CONNECTION_STRING": os.environ["DB_CONNECTION_STRING"],
-            },
-        }
-    )
+    # ray.init(
+    #     runtime_env={
+    #         "env_vars": {
+    #             "ANYSCALE_API_KEY": os.environ["ANYSCALE_API_KEY"],
+    #             "DB_CONNECTION_STRING": os.environ["DB_CONNECTION_STRING"],
+    #         },
+    #     }
+    # )
 
-    # ds = ray.data.read_parquet("/mnt/cluster_storage/offline_pipeline.parquet")
+    # ds = ray.data.read_parquet("/mnt/cluster_storage/offline_pipeline.parquet", override_num_blocks=nsamples)
 
-    ds = read_data(path)
+    ds = read_data(path, nsamples)
 
-    ds = preprocess_and_sample_data(ds, nsamples)
+    # ds = preprocess_and_sample_data(ds, nsamples)
 
     # generate description using LLAVA model
     ds = (
-        ds.repartition(nsamples)
-        .map_batches(download_images, num_cpus=4)
+        ds.map_batches(download_images, num_cpus=4)
         .filter(lambda x: bool(x["img"]))
         .map(gen_description_prompt)
         .map_batches(
             LlaVAMistral,
-            batch_size=1,
+            batch_size=5,
             num_gpus=1,
             concurrency=1,
             accelerator_type=NVIDIA_TESLA_A10G,
         )
     )
 
-    # # generate embeddings
+    # generate embeddings
     ds = (
         ds.map_batches(
             EmbedderSentenceTransformer,
             fn_kwargs={"cols": ["name", "description"]},
-            batch_size=10,
-            num_gpus=4 / 32,  # 4 GB / 32 GB
+            batch_size=5,
+            num_gpus=1,
             concurrency=1,
             accelerator_type=NVIDIA_TESLA_A10G,
         )
     )
 
-    ds_map = {}
+    # ds_map = {}
     for idx, (classifier, classifier_spec) in enumerate(classifiers.items()):
-        ds_map[classifier] = (
+        # ds_map[classifier] = (
+        ds = (
             ds.map(
                 classifier_spec["prompt_constructor"],
                 fn_kwargs={
@@ -524,7 +524,7 @@ def run_pipeline(path: str, nsamples: int):
                 # fn_constructor_kwargs={
                 #     "max_model_len": max_tokens,
                 # },
-                batch_size=10,
+                batch_size=5,
                 num_gpus=1,
                 concurrency=1,
                 accelerator_type=NVIDIA_TESLA_A10G,
@@ -542,17 +542,16 @@ def run_pipeline(path: str, nsamples: int):
                     "response_col": f"{classifier}_response",
                 },
             )
-            .drop_columns([f"{classifier}_prompt_tokens"])
-            .materialize()
-            .sort("name")
+            # .drop_columns([f"{classifier}_prompt_tokens"])
         )
+    
+    # for idx, (classifier, classifier_spec) in enumerate(classifiers.items()):
+    #     # join the prompt responses
+    #     if idx == 0:
+    #         ds = ds_map[classifier].materialize().sort("name")
 
-        # join the prompt responses
-        if idx == 0:
-            ds = ds_map[classifier]
-
-        else:
-            ds = ds.zip(ds_map[classifier].select_columns([f"{classifier}_response"]))
+    #     else:
+    #         ds = ds.zip(ds_map[classifier].materialize().sort("name").select_columns([f"{classifier}_response"]))
 
     # write out to db
     (
@@ -567,7 +566,6 @@ def run_pipeline(path: str, nsamples: int):
             concurrency=10,
             num_cpus=0.1,
             zero_copy_batch=True,
-            batch_format="pandas",
         )
         .materialize()
     )
@@ -577,7 +575,10 @@ if __name__ == "__main__":
     print("Running pipeline")
     # setup_db()
     # clear_data_in_db()
+    ctx = ray.data.DataContext.get_current()
+    ctx.target_min_block_size = 1 # 1 byte
+
     run_pipeline(
-        path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
-        nsamples=10,
+        path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset_deduped_100.csv",
+        nsamples=100,
     )
