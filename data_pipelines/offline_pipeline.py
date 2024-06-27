@@ -1,7 +1,7 @@
 """Data pipeline to generate embeddings and metadata for Myntra items and store in mongodb."""
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from typing import Any
 import numpy as np
 import os
 import pymongo
@@ -12,7 +12,7 @@ import io
 from pyarrow import csv
 from pymongo import MongoClient, ASCENDING, DESCENDING, UpdateOne
 from pymongo.operations import SearchIndexModel, IndexModel
-from vllm.multimodal.image import ImageFeatureData, ImagePixelData
+from vllm.multimodal.image import ImagePixelData
 import requests
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
@@ -38,7 +38,9 @@ class EmbedderSentenceTransformer:
         self, batch: dict[str, np.ndarray], cols: list[str]
     ) -> dict[str, np.ndarray]:
         for col in cols:
-            batch[f"{col}_embedding"] = self.model.encode(batch[col].tolist())
+            batch[f"{col}_embedding"] = self.model.encode(  # type: ignore
+                batch[col].tolist(), batch_size=len(batch[col])
+            )
         return batch
 
 
@@ -53,7 +55,7 @@ def gen_description_prompt(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def download_image(url: str) -> np.ndarray:
+def download_image(url: str) -> bytes:
     try:
         response = requests.get(url)
         response.raise_for_status()
@@ -64,7 +66,7 @@ def download_image(url: str) -> np.ndarray:
 
 def download_images(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     with ThreadPoolExecutor() as executor:
-        batch["img"] = list(executor.map(download_image, batch["img"]))
+        batch["img"] = list(executor.map(download_image, batch["img"]))  # type: ignore
     return batch
 
 
@@ -116,7 +118,7 @@ class LlaVAMistral:
                 sampling_params=self.sampling_params,
             )
             responses.append(resp[0].outputs[0].text)
-        batch["description"] = responses
+        batch["description"] = responses  # type: ignore
         return batch
 
 
@@ -130,10 +132,9 @@ class MistralTokenizer:
         row[output] = self.tokenizer.apply_chat_template(
             conversation=[{"role": "user", "content": row[input]}],
             add_generation_prompt=True,
-            tokenize=False,
+            tokenize=True,
             return_tensors="np",
-        )
-        row[output] = self.tokenizer(row[output], padding=True, truncation=True).squeeze()
+        ).squeeze()
         return row
 
 
@@ -160,11 +161,14 @@ class MistralvLLM:
             detokenize=False,
         )
 
-    def __call__(self, batch: dict[str, np.ndarray], input: str, output: str) -> dict[str, np.ndarray]:
+    def __call__(
+        self, batch: dict[str, np.ndarray], input: str, output: str
+    ) -> dict[str, np.ndarray]:
         responses = self.llm.generate(
-            prompt_token_ids=[ids.tolist() for ids in batch[input]], sampling_params=self.sampling_params
+            prompt_token_ids=[ids.tolist() for ids in batch[input]],
+            sampling_params=self.sampling_params,
         )
-        batch[output] = np.array([resp.outputs[0].token_ids for resp in responses], dtype=np.int32)
+        batch[output] = [resp.outputs[0].token_ids for resp in responses]  # type: ignore
         return batch
 
 
@@ -176,37 +180,6 @@ class MistralDeTokenizer:
 
     def __call__(self, row: dict[str, Any], key: str) -> dict[str, Any]:
         row[key] = self.tokenizer.decode(row[key], skip_special_tokens=True)
-        return row
-
-
-class BaseClassifierPromptConstructor:
-    @property
-    def max_class_len(self) -> int:
-        return len(max(self.classes, key=len))
-
-    def compute_max_length_words(
-        self, max_title_len: int, max_description_len: int
-    ) -> int:
-        max_input = len(
-            self.prompt_template.format(
-                title="x" * max_title_len,
-                description="x" * max_description_len,
-                classes_str=", ".join(self.classes),
-            )
-        )
-        max_output = self.max_class_len
-        return max_input + max_output
-
-    def __call__(self, row):
-        classes_str = ", ".join(self.classes)
-        title = row["name"]
-        description = row["description"]
-        print(f"running classifier with {title=} {description=}")
-        row["prompt"] = self.prompt_template.format(
-            title=title,
-            description=description,
-            classes_str=classes_str,
-        )
         return row
 
 
@@ -226,7 +199,10 @@ def construct_prompt_classifier(
     )
     return row
 
-def clean_response(row: dict[str, Any], response_col: str, classes: list[str]) -> str | None:
+
+def clean_response(
+    row: dict[str, Any], response_col: str, classes: list[str]
+) -> str | None:
     response_str = row[response_col]
     matches = []
     for class_ in classes:
@@ -238,6 +214,7 @@ def clean_response(row: dict[str, Any], response_col: str, classes: list[str]) -
         response = None
     row[response_col] = response
     return row
+
 
 classifiers: dict[str, Any] = {
     "category": {
@@ -285,38 +262,6 @@ classifiers: dict[str, Any] = {
 }
 
 
-class SeasonPromptConstructor(BaseClassifierPromptConstructor):
-    classes: list[str] = ["Summer", "Winter", "Spring", "Fall"]
-    prompt_template: str = (
-        "Given the title of this product: {title} and "
-        "the description: {description}, what season does it belong to? "
-        "Chose from the following seasons: {classes_str}. "
-        "Return the season that best fits the product. Only return the season name and nothing else."
-    )
-
-
-class ColorPromptConstructor(BaseClassifierPromptConstructor):
-    classes: list[str] = [
-        "Red",
-        "Blue",
-        "Green",
-        "Yellow",
-        "Black",
-        "White",
-        "Pink",
-        "Purple",
-        "Orange",
-        "Brown",
-        "Grey",
-    ]
-    prompt_template: str = (
-        "Given the title of this product: {title} and "
-        "the description: {description}, what color does it belong to? "
-        "Chose from the following colors: {classes_str}. "
-        "Return the color that best fits the product. Only return the color name and nothing else."
-    )
-
-
 def not_missing_data(row: dict[str, Any]) -> bool:
     if any(v is None for v in row.values()):
         return False
@@ -335,6 +280,8 @@ class MongoBulkUpdate:
     def __call__(self, batch_df: pd.DataFrame) -> dict[str, np.ndarray]:
         # cast embedding columns from arrays to lists
         for col in ["name_embedding", "description_embedding"]:
+            if col not in batch_df:
+                continue
             batch_df[col] = batch_df[col].apply(lambda x: x.tolist())
         docs = batch_df.to_dict(orient="records")
         bulk_ops = [
@@ -479,7 +426,8 @@ def preprocess_and_sample_data(ds: ray.data.Dataset, nsamples: int) -> ray.data.
             lambda x: all(x[k] is not None for k in ["name", "img", "price", "rating"])
         )
         # drop duplicates on name
-        .groupby("name").map_groups(keep_first)
+        .groupby("name")
+        .map_groups(keep_first)
     )
 
     count = ds_deduped.count()
@@ -487,6 +435,23 @@ def preprocess_and_sample_data(ds: ray.data.Dataset, nsamples: int) -> ray.data.
     print(f"Sampling {frac=} of the data")
 
     return ds_deduped.limit(nsamples)  # .random_sample(frac, seed=42)
+
+
+def update_record(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    batch["_id"] = batch["name"]
+    return {
+        "_id": batch["_id"],
+        "name": batch["name"],
+        "img": batch["img"], # Does img need to remain as a URL ?
+        "price": batch["price"],
+        "rating": batch["rating"],
+        "description": batch["description"],
+        "category": batch["category_response"],
+        # season
+        # color
+        # name_embedding
+        # description_embedding
+    }
 
 
 def run_pipeline(path: str, nsamples: int):
@@ -571,13 +536,15 @@ def run_pipeline(path: str, nsamples: int):
                 fn_kwargs={"key": f"{classifier}_response"},
                 concurrency=1,
                 num_cpus=1,
-            ).map(
+            )
+            .map(
                 clean_response,
                 fn_kwargs={
                     "classes": classifier_spec["classes"],
                     "response_col": f"{classifier}_response",
-                }
+                },
             )
+            .drop_columns([f"{classifier}_prompt_tokens"])
             .materialize()
             .sort("name")
         )
@@ -589,14 +556,28 @@ def run_pipeline(path: str, nsamples: int):
         else:
             ds = ds.zip(ds_map[classifier].select_columns([f"{classifier}_response"]))
 
-
     # write out to db
-    ds.write_parquet("/mnt/cluster_storage/offline_pipeline_3.parquet")
+    (
+        ds.map_batches(update_record)
+        .map_batches(
+            MongoBulkUpdate,
+            fn_constructor_kwargs={
+                "db": "myntra",
+                "collection": "myntra-items-offline",
+            },
+            batch_size=10,
+            concurrency=10,
+            num_cpus=0.1,
+            zero_copy_batch=True,
+            batch_format="pandas",
+        )
+        .materialize()
+    )
 
 
 if __name__ == "__main__":
     print("Running pipeline")
-    # setup_db()
+    setup_db()
     # clear_data_in_db()
     run_pipeline(
         path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset.csv",
