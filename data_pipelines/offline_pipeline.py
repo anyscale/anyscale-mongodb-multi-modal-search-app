@@ -119,7 +119,7 @@ class LlaVAMistral:
             sampling_params=self.sampling_params,
         )
 
-        batch["description"] = [resp.outputs[0].text for resp in responses] # type: ignore
+        batch["description"] = [resp.outputs[0].text for resp in responses]  # type: ignore
         return batch
 
 
@@ -140,11 +140,12 @@ class MistralTokenizer:
 
 
 class MistralvLLM:
-    def __init__(self):
+    def __init__(self, max_model_len: int = 4096, max_tokens: int = 2048, kv_cache_dtype: str = "fp8"):
         self.llm = LLM(
             model="mistralai/Mistral-7B-Instruct-v0.1",
-            max_model_len=4096,
+            max_model_len=max_model_len,
             skip_tokenizer_init=True,
+            kv_cache_dtype=kv_cache_dtype,
         )
         self.sampling_params = SamplingParams(
             n=1,
@@ -157,7 +158,7 @@ class MistralvLLM:
             temperature=0,
             use_beam_search=False,
             ignore_eos=False,
-            max_tokens=2048,
+            max_tokens=max_tokens,
             seed=None,
             detokenize=False,
         )
@@ -262,6 +263,13 @@ classifiers: dict[str, Any] = {
     },
 }
 
+mistral_tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")
+buffer_size = 40
+for classifier, classifier_spec in classifiers.items():
+    classifier_spec["max_output_tokens"] = max(
+        len(mistral_tokenizer.encode(class_) for class_ in classifier_spec["classes"])
+    ) + buffer_size
+
 
 def not_missing_data(row: dict[str, Any]) -> bool:
     if any(v is None for v in row.values()):
@@ -279,7 +287,6 @@ class MongoBulkUpdate:
         self.collection = client[db][collection]
 
     def __call__(self, batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        # cast embedding columns from arrays to lists
         batch_df = pd.DataFrame(batch)
         docs = batch_df.to_dict(orient="records")
         bulk_ops = [
@@ -287,7 +294,7 @@ class MongoBulkUpdate:
             for doc in docs
         ]
         self.collection.bulk_write(bulk_ops)
-        return batch
+        return {}
 
 
 class MongoBulkInsert:
@@ -425,8 +432,7 @@ def preprocess_and_sample_data(ds: ray.data.Dataset, nsamples: int) -> ray.data.
             lambda x: all(x[k] is not None for k in ["name", "img", "price", "rating"])
         )
         # drop duplicates on name
-        .groupby("name")
-        .map_groups(keep_first)
+        .groupby("name").map_groups(keep_first)
     )
 
     count = ds_deduped.count()
@@ -453,21 +459,13 @@ def update_record(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     }
 
 
+def compute_num_tokens(row: dict[str, np.ndarray], col: str) -> dict[str, np.ndarray]:
+    row["num_tokens"] = len(row[col])
+    return row
+
+
 def run_pipeline(path: str, nsamples: int):
-    # ray.init(
-    #     runtime_env={
-    #         "env_vars": {
-    #             "ANYSCALE_API_KEY": os.environ["ANYSCALE_API_KEY"],
-    #             "DB_CONNECTION_STRING": os.environ["DB_CONNECTION_STRING"],
-    #         },
-    #     }
-    # )
-
-    # ds = ray.data.read_parquet("/mnt/cluster_storage/offline_pipeline.parquet", override_num_blocks=nsamples)
-
     ds = read_data(path, nsamples)
-
-    # ds = preprocess_and_sample_data(ds, nsamples)
 
     # generate description using LLAVA model
     ds = (
@@ -493,36 +491,49 @@ def run_pipeline(path: str, nsamples: int):
         accelerator_type=NVIDIA_TESLA_A10G,
     )
 
-    # ds_map = {}
-    for idx, (classifier, classifier_spec) in enumerate(classifiers.items()):
-        # ds_map[classifier] = (
+    # generate classifier prompts and responses
+    for classifier, classifier_spec in classifiers.items():
+        ds = ds.map(
+            classifier_spec["prompt_constructor"],
+            fn_kwargs={
+                "prompt_template": classifier_spec["prompt_template"],
+                "classes": classifier_spec["classes"],
+                "col": classifier,
+            },
+        ).map(
+            MistralTokenizer,
+            fn_kwargs={
+                "input": f"{classifier}_prompt",
+                "output": f"{classifier}_prompt_tokens",
+            },
+            concurrency=1,
+            num_cpus=1,
+        )
+        
+        # compute the maximum number of tokens in the input prompt
+        max_input_tokens = (
+            ds.select_columns([f"{classifier}_prompt_tokens"])
+            .map(compute_num_tokens, fn_kwargs={"col": f"{classifier}_prompt_tokens"})
+            .max(on="num_tokens")
+        )
+
+        # resolve maximum model sequence length - this is necessary to maximize
+        # KV cache capacity. The longer the sequence length, the more blocks
+        # need to be allocated.
+        max_output_tokens = classifier_spec["max_output_tokens"]
+        max_model_length = max_input_tokens + max_output_tokens
+
         ds = (
-            ds.map(
-                classifier_spec["prompt_constructor"],
-                fn_kwargs={
-                    "prompt_template": classifier_spec["prompt_template"],
-                    "classes": classifier_spec["classes"],
-                    "col": classifier,
-                },
-            )
-            .map(
-                MistralTokenizer,
-                fn_kwargs={
-                    "input": f"{classifier}_prompt",
-                    "output": f"{classifier}_prompt_tokens",
-                },
-                concurrency=1,
-                num_cpus=1,
-            )
-            .map_batches(
+            ds.map_batches(
                 MistralvLLM,
                 fn_kwargs={
                     "input": f"{classifier}_prompt_tokens",
                     "output": f"{classifier}_response",
                 },
-                # fn_constructor_kwargs={
-                #     "max_model_len": max_tokens,
-                # },
+                fn_constructor_kwargs={
+                    "max_model_len": max_model_length,
+                    "max_tokens": max_output_tokens,
+                },
                 batch_size=5,
                 num_gpus=1,
                 concurrency=1,
@@ -541,16 +552,7 @@ def run_pipeline(path: str, nsamples: int):
                     "response_col": f"{classifier}_response",
                 },
             )
-            # .drop_columns([f"{classifier}_prompt_tokens"])
         )
-
-    # for idx, (classifier, classifier_spec) in enumerate(classifiers.items()):
-    #     # join the prompt responses
-    #     if idx == 0:
-    #         ds = ds_map[classifier].materialize().sort("name")
-
-    #     else:
-    #         ds = ds.zip(ds_map[classifier].materialize().sort("name").select_columns([f"{classifier}_response"]))
 
     # write out to db
     (
