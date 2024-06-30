@@ -1,27 +1,24 @@
 """Data pipeline to generate embeddings and metadata for Myntra items and store in mongodb."""
 
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
-import numpy as np
-import os
-import pymongo
-import pyarrow as pa
-import ray
-import pandas as pd
-import io
-from pyarrow import csv
-from pymongo import MongoClient, ASCENDING, DESCENDING, UpdateOne
-from pymongo.operations import SearchIndexModel, IndexModel
-from vllm.multimodal.image import ImagePixelData
-import requests
-from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
-from sentence_transformers import SentenceTransformer
-from ray.util.accelerators import NVIDIA_TESLA_A10G
-from PIL import Image
-import torchvision
+from __future__ import annotations
 
-# BERT model not supported yet
+import io
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Literal
+
+import numpy as np
+import requests
+import torchvision
+from ray.util.accelerators import NVIDIA_TESLA_A10G
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer
+from vllm.multimodal.image import ImagePixelData
+from vllm import LLM, SamplingParams
+from PIL import Image
+
+from data_pipelines.data import MongoBulkInsert, MongoBulkUpdate, read_data
+
+# BERT model not supported yet in vllm
 # class EmbedderVLLM:
 #     def __init__(self, model: str = "thenlper/gte-large"):
 #         self.model = LLM(model)
@@ -258,7 +255,7 @@ def construct_prompt_classifier(
 
 def clean_response(
     row: dict[str, Any], response_col: str, classes: list[str]
-) -> str | None:
+) -> dict[str, Any]:
     response_str = row[response_col]
     matches = []
     for class_ in classes:
@@ -317,189 +314,6 @@ classifiers: dict[str, Any] = {
     },
 }
 
-mistral_tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")
-buffer_size = 40
-for classifier, classifier_spec in classifiers.items():
-    classifier_spec["max_output_tokens"] = (
-        max(
-            len(mistral_tokenizer.encode(class_))
-            for class_ in classifier_spec["classes"]
-        )
-        + buffer_size
-    )
-
-
-def not_missing_data(row: dict[str, Any]) -> bool:
-    if any(v is None for v in row.values()):
-        return False
-    return True
-
-
-def keep_first(g):
-    return {k: np.array([v[0]]) for k, v in g.items()}
-
-
-class MongoBulkUpdate:
-    def __init__(self, db: str, collection: str) -> None:
-        client = MongoClient(os.environ["DB_CONNECTION_STRING"])
-        self.collection = client[db][collection]
-
-    def __call__(self, batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        batch_df = pd.DataFrame(batch)
-        docs = batch_df.to_dict(orient="records")
-        bulk_ops = [
-            UpdateOne(filter={"_id": doc["_id"]}, update={"$set": doc}, upsert=True)
-            for doc in docs
-        ]
-        self.collection.bulk_write(bulk_ops)
-        return {}
-
-
-class MongoBulkInsert:
-    def __init__(self, db: str, collection: str) -> None:
-        client = MongoClient(os.environ["DB_CONNECTION_STRING"])
-        self.collection = client[db][collection]
-
-    def __call__(self, batch_df: pd.DataFrame) -> dict[str, np.ndarray]:
-        for col in ["name_embedding", "description_embedding"]:
-            batch_df[col] = batch_df[col].apply(lambda x: x.tolist())
-        docs = batch_df.to_dict(orient="records")
-        self.collection.insert_many(docs)
-        return {}
-
-
-def setup_collection():
-    """
-    Creates the following:
-
-    database: "myntra"
-        - collection: "myntra-items-offline" with the following indices:
-            - An index on the "name" field with a standard lucene analyzer
-            - A vector index on the embedding fields
-            - Single field indices on the rest of the search fields
-    """
-    mongo_client = MongoClient(os.environ["DB_CONNECTION_STRING"])
-    db = mongo_client["myntra"]
-    db.drop_collection("myntra-items-offline")
-    my_collection = db["myntra-items-offline"]
-
-    my_collection.create_indexes(
-        [
-            IndexModel([("rating", DESCENDING)]),
-            IndexModel([("category", ASCENDING)]),
-            IndexModel([("season", ASCENDING)]),
-            IndexModel([("color", ASCENDING)]),
-        ]
-    )
-
-    # TODO - uncomment when no longer running on m0 cluster
-    # my_collection.create_search_index(
-    #     {
-    #         "definition": {
-    #             "mappings": {
-    #                 "dynamic": False,
-    #                 "fields": {
-    #                     "name": {
-    #                         "type": "string",
-    #                         "analyzer": "lucene.standard",
-    #                     },
-    #                 },
-    #             }
-    #         },
-    #         "name": "lexical_text_search_index",
-    #     }
-    # )
-
-    # my_collection.create_search_index(
-    #     {
-    #         "definition": {
-    #             "mappings": {
-    #                 "dynamic": False,
-    #                 "fields": [
-    #                     {
-    #                         "numDimensions": 1024,
-    #                         "similarity": "cosine",
-    #                         "type": "vector",
-    #                         "path": "description_embedding",
-    #                     },
-    #                     {
-    #                         "type": "filter",
-    #                         "path": "category",
-    #                     },
-    #                     {
-    #                         "type": "filter",
-    #                         "path": "season",
-    #                     },
-    #                     {
-    #                         "type": "filter",
-    #                         "path": "color",
-    #                     },
-    #                     {
-    #                         "type": "filter",
-    #                         "path": "rating",
-    #                     },
-    #                     {
-    #                         "type": "filter",
-    #                         "path": "price",
-    #                     },
-    #                 ],
-    #             }
-    #         },
-    #         "name": "vector_search_index",
-    #     }
-    # )
-
-
-def clear_data_in_collection():
-    mongo_client: pymongo.MongoClient = pymongo.MongoClient(
-        os.environ["DB_CONNECTION_STRING"],
-    )
-    db = mongo_client["myntra"]
-    my_collection = db["myntra-items-offline"]
-    my_collection.delete_many({})
-
-
-def read_data(path: str, nsamples: int) -> ray.data.Dataset:
-    ds = ray.data.read_csv(
-        path,
-        parse_options=csv.ParseOptions(newlines_in_values=True),
-        convert_options=csv.ConvertOptions(
-            column_types={
-                "id": pa.int64(),
-                "name": pa.string(),
-                "img": pa.string(),
-                "asin": pa.string(),
-                "price": pa.float64(),
-                "mrp": pa.float64(),
-                "rating": pa.float64(),
-                "ratingTotal": pa.int64(),
-                "discount": pa.int64(),
-                "seller": pa.string(),
-                "purl": pa.string(),
-            }
-        ),
-        override_num_blocks=nsamples,
-    )
-    return ds
-
-
-def preprocess_and_sample_data(ds: ray.data.Dataset, nsamples: int) -> ray.data.Dataset:
-    ds_deduped = (
-        # remove rows missing values
-        ds.filter(
-            lambda x: all(x[k] is not None for k in ["name", "img", "price", "rating"])
-        )
-        # drop duplicates on name
-        .groupby("name")
-        .map_groups(keep_first)
-    )
-
-    count = ds_deduped.count()
-    frac = nsamples / count
-    print(f"Sampling {frac=} of the data")
-
-    return ds_deduped.limit(nsamples)  # .random_sample(frac, seed=42)
-
 
 def update_record(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     batch["_id"] = batch["name"]
@@ -523,8 +337,36 @@ def compute_num_tokens(row: dict[str, np.ndarray], col: str) -> dict[str, np.nda
     return row
 
 
-def run_pipeline(path: str, nsamples: int):
+def estimate_workers(nsamples: int) -> tuple[int, int, int]:
+    if nsamples < 1000:
+        num_llava_workers = 1
+        num_embedder_workers = 1
+        num_mistral_workers_per_classifier = 1
+    elif nsamples < 10000:
+        num_llava_workers = 10
+        num_embedder_workers = 2
+        num_mistral_workers_per_classifier = 2
+    elif nsamples < 100000:
+        num_llava_workers = 20
+        num_embedder_workers = 4
+        num_mistral_workers_per_classifier = 4
+    else:
+        raise NotImplementedError("More than 100k samples not supported yet")
+    return num_llava_workers, num_embedder_workers, num_mistral_workers_per_classifier
+
+
+def run_pipeline(
+    path: str,
+    nsamples: int,
+    mode: Literal["first_run", "update"],
+    db_name: str,
+    collection_name: str,
+):
     ds = read_data(path, nsamples)
+
+    num_llava_workers, num_embedder_workers, num_mistral_workers_per_classifier = (
+        estimate_workers(nsamples)
+    )
 
     # generate description using LLAVA model
     ds = (
@@ -532,10 +374,14 @@ def run_pipeline(path: str, nsamples: int):
         .filter(lambda x: bool(x["img"]))
         .map(LargestCenterSquare(size=336))
         .map(gen_description_prompt)
-        # generate tokens for the description prompt
         .materialize()
     )
 
+    # compute input/output distribution for LLAVA model
+    # this is required to resolve the maximum model sequence length
+    # this is necessary to maximize KV cache capacity.
+    # The longer the sequence length, the more blocks need to be allocated
+    # per sequence, which reduces the number of sequences that can fit in the cache.
     max_input_tokens = (
         ds.map(
             LlaVAMistralTokenizer,
@@ -556,6 +402,7 @@ def run_pipeline(path: str, nsamples: int):
         f"Description gen: {max_input_tokens=} {max_output_tokens=} {max_model_length=}"
     )
 
+    # generate description using LLAVA model
     ds = ds.map_batches(
         LlaVAMistral,
         fn_constructor_kwargs={
@@ -566,7 +413,7 @@ def run_pipeline(path: str, nsamples: int):
         fn_kwargs={"col": "description_prompt"},
         batch_size=80,
         num_gpus=1,
-        concurrency=1,
+        concurrency=num_llava_workers,
         accelerator_type=NVIDIA_TESLA_A10G,
     )
 
@@ -576,9 +423,24 @@ def run_pipeline(path: str, nsamples: int):
         fn_kwargs={"cols": ["name", "description"]},
         batch_size=80,
         num_gpus=1,
-        concurrency=1,
+        concurrency=num_embedder_workers,
         accelerator_type=NVIDIA_TESLA_A10G,
     )
+
+    # compute classifier outputs locally
+    # TODO - move to ray data call
+    mistral_tokenizer = AutoTokenizer.from_pretrained(
+        "mistralai/Mistral-7B-Instruct-v0.1"
+    )
+    buffer_size = 40
+    for classifier, classifier_spec in classifiers.items():
+        classifier_spec["max_output_tokens"] = (
+            max(
+                len(mistral_tokenizer.encode(class_))
+                for class_ in classifier_spec["classes"]
+            )
+            + buffer_size
+        )
 
     # generate classifier prompts and responses
     for classifier, classifier_spec in classifiers.items():
@@ -603,21 +465,18 @@ def run_pipeline(path: str, nsamples: int):
             .materialize()
         )
 
-        # compute the maximum number of tokens in the input prompt
+        # compute input/output distribution for Mistral model
         max_input_tokens = (
             ds.select_columns([f"{classifier}_prompt_tokens"])
             .map(compute_num_tokens, fn_kwargs={"col": f"{classifier}_prompt_tokens"})
             .max(on="num_tokens")
         )
-
-        # resolve maximum model sequence length - this is necessary to maximize
-        # KV cache capacity. The longer the sequence length, the more blocks
-        # need to be allocated.
         max_output_tokens = classifier_spec["max_output_tokens"]
         print(f"{classifier=} {max_input_tokens=} {max_output_tokens=}")
         max_model_length = max_input_tokens + max_output_tokens
         classifier_spec["max_model_length"] = max_model_length
 
+    # generate classifier responses
     for classifier, classifier_spec in classifiers.items():
         ds = (
             ds.map_batches(
@@ -631,7 +490,7 @@ def run_pipeline(path: str, nsamples: int):
                     "max_tokens": classifier_spec["max_output_tokens"],
                 },
                 batch_size=80,
-                num_gpus=1,
+                num_gpus=num_mistral_workers_per_classifier,
                 concurrency=1,
                 accelerator_type=NVIDIA_TESLA_A10G,
             )
@@ -651,13 +510,19 @@ def run_pipeline(path: str, nsamples: int):
         )
 
     # write out to db
+    mongo_bulk_op: MongoBulkInsert | MongoBulkUpdate
+    if mode == "first_run":
+        mongo_bulk_op = MongoBulkInsert
+    elif mode == "update":
+        mongo_bulk_op = MongoBulkUpdate
+
     (
         ds.map_batches(update_record)
         .map_batches(
-            MongoBulkUpdate,
+            mongo_bulk_op,
             fn_constructor_kwargs={
-                "db": "myntra",
-                "collection": "myntra-items-offline",
+                "db": db_name,
+                "collection": collection_name,
             },
             batch_size=80,
             concurrency=10,
@@ -665,17 +530,4 @@ def run_pipeline(path: str, nsamples: int):
             zero_copy_batch=True,
         )
         .materialize()
-    )
-
-
-if __name__ == "__main__":
-    print("Running pipeline")
-    # setup_collection()
-    clear_data_in_collection()
-    ctx = ray.data.DataContext.get_current()
-    ctx.target_min_block_size = 1  # 1 byte
-
-    run_pipeline(
-        path="s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset_deduped_100.csv",
-        nsamples=100,
     )

@@ -31,10 +31,12 @@ def filter_products_with_ai(
     min_price: int,
     max_price: int,
     min_rating: float,
-    synthetic_categories: list[str],
+    categories: list[str],
     colors: list[str],
     seasons: list[str],
     num_results: int,
+    search_type: list[str],
+    embedding_column: str,
 ):
     params = {
         "text_search": text_search or "",
@@ -42,15 +44,17 @@ def filter_products_with_ai(
         "max_price": max_price,
         "min_rating": min_rating,
         "num_results": num_results,
+        "embedding_column": embedding_column,
     }
     body = {
-        "synthetic_categories": synthetic_categories,
+        "categories": categories,
         "colors": colors,
         "seasons": seasons,
+        "search_type": search_type,
     }
 
     response = requests.get(
-        f"{ANYSCALE_BACKEND_SERVICE_URL}/vector",
+        f"{ANYSCALE_BACKEND_SERVICE_URL}/ai_enabled",
         params=params,
         json=body,
     )
@@ -125,7 +129,7 @@ def build_interface():
                     min_rating_component = gr.Slider(
                         rating_min, rating_max, step=0.25, label="Min Rating"
                     )
-                    synthetic_category_component = gr.CheckboxGroup(
+                    category_component = gr.CheckboxGroup(
                         ["Tops", "Bottoms", "Dresses", "Footwear", "Accessories"],
                         label="Category",
                         value=[
@@ -178,6 +182,22 @@ def build_interface():
                     max_num_results_component = gr.Slider(
                         1, 100, step=1, label="Max Results", value=20
                     )
+
+                    # add an engine advanced options
+                    with gr.Accordion(label="Advanced Engine Options"):
+                        # checkbox for type of search - lexical and/or vector
+                        search_type_component = gr.CheckboxGroup(
+                            ["Lexical", "Vector"],
+                            label="Search Type",
+                            value=["Lexical", "Vector"],
+                        )
+                        # dropdwon for embedding column - name or description
+                        embedding_column_component = gr.Dropdown(
+                            ["name", "description"],
+                            label="Embedding Column",
+                            value="description",
+                        )
+                        
                     filter_button_component = gr.Button("Filter")
                 with gr.Column(scale=3):
                     gallery = gr.Gallery(
@@ -190,10 +210,12 @@ def build_interface():
                 min_price_component,
                 max_price_component,
                 min_rating_component,
-                synthetic_category_component,
+                category_component,
                 color_component,
                 season_component,
                 max_num_results_component,
+                search_type_component,
+                embedding_column_component,
             ]
 
             filter_button_component.click(
