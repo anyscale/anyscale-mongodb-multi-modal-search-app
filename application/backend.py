@@ -21,6 +21,7 @@ def vector_search(
     categories: list[str],
     colors: list[str],
     seasons: list[str],
+    cosine_score_threshold: float = 0.92,
 ) -> list[dict]:
     return [
         {
@@ -38,7 +39,15 @@ def vector_search(
                     "season": {"$in": seasons},
                 },
             }
-        }
+        },
+        {
+            "$project": {
+                "img": 1,
+                "name": 1,
+                "score": {"$meta": "vectorSearchScore"},
+            }
+        },
+        {"$match": {"score": {"$gte": cosine_score_threshold}}},
     ]
 
 
@@ -72,6 +81,7 @@ def hybrid_search(
     seasons: list[str],
     vector_penalty: int,
     full_text_penalty: int,
+    cosine_score_threshold: float = 0.92,
 ) -> list[dict]:
     return [
         {
@@ -90,6 +100,15 @@ def hybrid_search(
                 },
             }
         },
+        {
+            "$project": {
+                "_id": 1,
+                "img": 1,
+                "name": 1,
+                "score": {"$meta": "vectorSearchScore"},
+            }
+        },
+        {"$match": {"score": {"$gte": cosine_score_threshold}}},
         {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
         {"$unwind": {"path": "$docs", "includeArrayIndex": "rank"}},
         {
