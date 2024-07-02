@@ -1,47 +1,47 @@
 # Enterprise Multi-Modal Hybrid Search System
 
-Welcome to the **Enterprise Multi-Modal Hybrid Search System** repository! This project demonstrates a comprehensive solution for implementing a scalable multi-modal search system that combines both legacy and modern search techniques, leveraging cutting-edge technologies and infrastructure.
+Welcome to the **Enterprise Multi-Modal Hybrid Search System** repository! This project demonstrates a comprehensive solution for implementing a scalable multi-modal search system leveraging cutting-edge technologies and infrastructure.
+
+We split our system into an offline data indexing stage and an online search stage.
+
+The offline data indexing stage performs the processing, embedding, and upserting text and images into a MongoDB database that supports vector search across multiple fields and dimensions. This stage is built by running multi-modal data pipelines at scale using Anyscale for AI compute platform.
+
+The online search stage performs the necessary search operations by combining legacy text matching with advanced semantic search capabilities offered by MongoDB. This stage is built by running a multi-modal search backend on Anyscale.
 
 ## Multi-Modal Data Pipelines at Scale
 
 ### Overview
-The project includes scalable offline batch inference and embeddings generation capabilities, designed to handle both text and image data. Key features include:
-- Efficient processing, embedding, and upserting of text and images.
-- Utilization of heterogeneous hardware for optimal performance.
-- Production-ready data pipelines powered by Anyscale.
-- MongoDB as the central data repository.
-- Scalable updating of embeddings in MongoDB.
+The data pipelines show how to perform offline batch inference and embeddings generation at scale. The pipelines are designed to handle both text and image data by running multi-modal large language model instances. 
 
 ### Directory Structure
-- **data_pipelines/** 
-  - **data.py**: Handles data I/O operations, transferring data from the Data Lake to MongoDB.
-  - **offline_compute.py**: Manages offline batch inference and embeddings generation.
-  - **online_compute.py**: Responsible for online inference and embeddings generation.
+
+- `data_pipelines/` 
+  - `data.py`: Handles data I/O operations, transferring data from the Data Lake to MongoDB.
+  - `offline_compute.py`: Manages offline batch inference and embeddings computation/
+  - `online_compute.py`: A naive implementation via a REST API for online inference and embeddings computation.
 
 ### Technology Stack
-- **ray[data]**
-- **vLLM**
-- **pymongo**
-- **sentence-transformers**
+
+- `ray[data]`
+- `vLLM`
+- `pymongo`
+- `sentence-transformers`
 
 ## Multi-Modal Search at Scale
 
 ### Overview
-The search backend combines legacy text matching with advanced semantic search capabilities, offering a robust hybrid search solution. Key features include:
-- **Service 1**: Legacy search utilizing text matching and metadata, powered by MongoDB Atlas.
-- **Service 2**: Advanced semantic search using multi-modal models and large language models (LLMs), ensuring enhanced accuracy and relevance.
-- All models are self-hosted to ensure security and privacy.
+The search backend combines legacy lexical text matching with advanced semantic search capabilities, offering a robust hybrid search solution. 
 
 ### Directory Structure
-- **applications/** 
-  - **backend.py**: Implements the hybrid search backend.
-  - **frontend.py**: Provides a Gradio-based UI for interacting with the search backend.
+- `applications/` 
+  - `backend.py`: Implements the hybrid search backend.
+  - `frontend.py`: Provides a Gradio-based UI for interacting with the search backend.
 
 ### Technology Stack
-- **ray[serve]**
-- **gradio**
-- **motor**
-- **sentence-transformers**
+- `ray[serve]`
+- `gradio`
+- `motor`
+- `sentence-transformers`
 
 
 
