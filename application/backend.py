@@ -42,6 +42,7 @@ def vector_search(
         },
         {
             "$project": {
+                "_id": 1,
                 "img": 1,
                 "name": 1,
                 "score": {"$meta": "vectorSearchScore"},
@@ -51,17 +52,119 @@ def vector_search(
     ]
 
 
-def lexical_search(text_search: str) -> list[dict]:
+def lexical_search(text_search: str, text_search_index_name: str) -> list[dict]:
     return [
         {
             "$search": {
-                "index": "lexical_text_search_index",
+                "index": text_search_index_name,
                 "text": {
                     "query": text_search,
                     "path": "name",
                 },
             }
         }
+    ]
+
+
+def match_on_metadata(
+    min_price: int,
+    max_price: int,
+    min_rating: float,
+    n: int,
+    categories: list[str] | None = None,
+    colors: list[str] | None = None,
+    seasons: list[str] | None = None,
+) -> list[dict]:
+    match_spec = {
+        "price": {
+            "$gte": min_price,
+            "$lte": max_price,
+        },
+        "rating": {"$gte": min_rating},
+    }
+    if categories:
+        match_spec["category"] = {"$in": categories}
+    if colors:
+        match_spec["color"] = {"$in": colors}
+    if seasons:
+        match_spec["season"] = {"$in": seasons}
+
+    return [
+        {
+            "$match": match_spec,
+        },
+        {"$limit": n},
+    ]
+
+
+def convert_rank_to_score(score_name: str, score_penalty: float) -> list[dict]:
+    return [
+        {
+            "$group": {
+                "_id": None,
+                "docs": {
+                    "$push": "$$ROOT",
+                },
+            }
+        },
+        {
+            "$unwind": {
+                "path": "$docs",
+                "includeArrayIndex": "rank",
+            }
+        },
+        {
+            "$addFields": {
+                score_name: {
+                    "$divide": [
+                        1.0,
+                        {"$add": ["$rank", score_penalty, 1]},
+                    ]
+                }
+            }
+        },
+        {
+            "$project": {
+                score_name: 1,
+                "_id": "$docs._id",
+                "name": "$docs.name",
+                "img": "$docs.img",
+            }
+        },
+    ]
+
+
+def rerank_by_combined_score(
+    vs_score_name: str, fts_score_name: str, n: int
+) -> list[dict]:
+    return [
+        {
+            "$group": {
+                "_id": "$name",
+                "img": {"$first": "$img"},
+                vs_score_name: {"$max": f"${vs_score_name}"},
+                fts_score_name: {"$max": f"${fts_score_name}"},
+            }
+        },
+        {
+            "$project": {
+                "_id": 1,
+                "img": 1,
+                vs_score_name: {"$ifNull": [f"${vs_score_name}", 0]},
+                fts_score_name: {"$ifNull": [f"${fts_score_name}", 0]},
+            }
+        },
+        {
+            "$project": {
+                "name": "$_id",
+                "img": 1,
+                vs_score_name: 1,
+                fts_score_name: 1,
+                "score": {"$add": [f"${fts_score_name}", f"${vs_score_name}"]},
+            }
+        },
+        {"$sort": {"score": -1}},
+        {"$limit": n},
     ]
 
 
@@ -83,144 +186,59 @@ def hybrid_search(
     full_text_penalty: int,
     cosine_score_threshold: float = 0.92,
 ) -> list[dict]:
+    # 1. Perform vector search
+    vector_search_stages = vector_search(
+        vector_search_index_name=vector_search_index_name,
+        vector_search_path=vector_search_path,
+        embedding=embedding,
+        n=n,
+        min_price=min_price,
+        max_price=max_price,
+        min_rating=min_rating,
+        categories=categories,
+        colors=colors,
+        seasons=seasons,
+        cosine_score_threshold=cosine_score_threshold,
+    )
+    convert_vector_rank_to_score_stages = convert_rank_to_score(
+        score_name="vs_score", score_penalty=vector_penalty
+    )
+
+    # 2. Perform lexical search
+    lexical_search_stages = lexical_search(text_search=text_search, text_search_index_name=text_search_index_name)
+    post_filter_stages = match_on_metadata(
+        min_price=min_price,
+        max_price=max_price,
+        min_rating=min_rating,
+        categories=categories,
+        colors=colors,
+        seasons=seasons,
+        n=n,
+    )
+    convert_text_rank_to_score_stages = convert_rank_to_score(
+        score_name="fts_score", score_penalty=full_text_penalty
+    )
+
+    # 3. Rerank by combined score
+    rerank_stages = rerank_by_combined_score(
+        vs_score_name="vs_score", fts_score_name="fts_score", n=n
+    )
+
+    # 4. Put it all together
     return [
-        {
-            "$vectorSearch": {
-                "index": vector_search_index_name,
-                "path": vector_search_path,
-                "queryVector": embedding.tolist(),
-                "numCandidates": 100,
-                "limit": n,
-                "filter": {
-                    "price": {"$gte": min_price, "$lte": max_price},
-                    "rating": {"$gte": min_rating},
-                    "category": {"$in": categories},
-                    "color": {"$in": colors},
-                    "season": {"$in": seasons},
-                },
-            }
-        },
-        {
-            "$project": {
-                "_id": 1,
-                "img": 1,
-                "name": 1,
-                "score": {"$meta": "vectorSearchScore"},
-            }
-        },
-        {"$match": {"score": {"$gte": cosine_score_threshold}}},
-        {"$group": {"_id": None, "docs": {"$push": "$$ROOT"}}},
-        {"$unwind": {"path": "$docs", "includeArrayIndex": "rank"}},
-        {
-            "$addFields": {
-                "vs_score": {
-                    "$divide": [
-                        1.0,
-                        {"$add": ["$rank", vector_penalty, 1]},
-                    ]
-                }
-            }
-        },
-        {
-            "$project": {
-                "vs_score": 1,
-                "_id": "$docs._id",
-                "name": "$docs.name",
-                "img": "$docs.img",
-            }
-        },
+        *vector_search_stages,
+        *convert_vector_rank_to_score_stages,
         {
             "$unionWith": {
                 "coll": collection_name,
                 "pipeline": [
-                    {
-                        "$search": {
-                            "index": text_search_index_name,
-                            "text": {
-                                "query": text_search,
-                                "path": "name",
-                            },
-                        }
-                    },
-                    {
-                        "$match": {
-                            "price": {
-                                "$gte": min_price,
-                                "$lte": max_price,
-                            },
-                            "rating": {"$gte": min_rating},
-                            "category": {"$in": categories},
-                            "color": {"$in": colors},
-                            "season": {"$in": seasons},
-                        }
-                    },
-                    {"$limit": 20},
-                    {
-                        "$group": {
-                            "_id": None,
-                            "docs": {"$push": "$$ROOT"},
-                        }
-                    },
-                    {
-                        "$unwind": {
-                            "path": "$docs",
-                            "includeArrayIndex": "rank",
-                        }
-                    },
-                    {
-                        "$addFields": {
-                            "fts_score": {
-                                "$divide": [
-                                    1.0,
-                                    {
-                                        "$add": [
-                                            "$rank",
-                                            full_text_penalty,
-                                            1,
-                                        ]
-                                    },
-                                ]
-                            }
-                        }
-                    },
-                    {
-                        "$project": {
-                            "fts_score": 1,
-                            "_id": "$docs._id",
-                            "name": "$docs.name",
-                            "img": "$docs.img",
-                        }
-                    },
+                    *lexical_search_stages,
+                    *post_filter_stages,
+                    *convert_text_rank_to_score_stages,
                 ],
             }
         },
-        {
-            "$group": {
-                "_id": "$name",
-                "img": {"$first": "$img"},
-                "vs_score": {"$max": "$vs_score"},
-                "fts_score": {"$max": "$fts_score"},
-            }
-        },
-        {
-            "$project": {
-                "_id": 1,
-                "img": 1,
-                "vs_score": {"$ifNull": ["$vs_score", 0]},
-                "fts_score": {"$ifNull": ["$fts_score", 0]},
-            }
-        },
-        {
-            "$project": {
-                "score": {"$add": ["$fts_score", "$vs_score"]},
-                "name": "$_id",
-                "img": 1,
-                "vs_score": 1,
-                "fts_score": 1,
-            }
-        },
-        {"$sort": {"score": -1}},
-        {"$limit": n},
+        *rerank_stages,
     ]
 
 
@@ -252,6 +270,7 @@ class QueryLegacySearch:
         max_price: int,
         min_rating: float,
         n: int = 20,
+        text_search_index_name: str = "lexical_text_search_index",
     ) -> list[tuple[str, str]]:
         logger = logging.getLogger("ray.serve")
         logger.setLevel(logging.DEBUG)
@@ -261,19 +280,20 @@ class QueryLegacySearch:
 
         pipeline = []
         if text_search.strip():
-            pipeline.extend(lexical_search(text_search))
+            pipeline.extend(
+                lexical_search(
+                    text_search=text_search,
+                    text_search_index_name=text_search_index_name,
+                )
+            )
+
         pipeline.extend(
-            [
-                {
-                    "$match": {
-                        "price": {"$gte": min_price, "$lte": max_price},
-                        "rating": {"$gte": min_rating},
-                    }
-                },
-                {
-                    "$limit": n,
-                },
-            ]
+            match_on_metadata(
+                min_price=min_price,
+                max_price=max_price,
+                min_rating=min_rating,
+                n=n,
+            )
         )
 
         logger.debug(f"Running pipeline: {pipeline}")
@@ -372,34 +392,33 @@ class QueryAIEnabledSearch:
                     )
                 )
             elif search_type == {"lexical"}:
-                pipeline.extend(lexical_search(text_search))
                 pipeline.extend(
-                    [
-                        {
-                            "$match": {
-                                "price": {"$gte": min_price, "$lte": max_price},
-                                "rating": {"$gte": min_rating},
-                                "category": {"$in": categories},
-                                "color": {"$in": colors},
-                                "season": {"$in": seasons},
-                            }
-                        },
-                        {"$limit": n},
-                    ]
+                    lexical_search(
+                        text_search=text_search,
+                        text_search_index_name=text_search_index_name,
+                    )
+                )
+                pipeline.extend(
+                    match_on_metadata(
+                        min_price=min_price,
+                        max_price=max_price,
+                        min_rating=min_rating,
+                        n=n,
+                        categories=categories,
+                        colors=colors,
+                        seasons=seasons,
+                    )
                 )
         else:
-            pipeline = [
-                {
-                    "$match": {
-                        "price": {"$gte": min_price, "$lte": max_price},
-                        "rating": {"$gte": min_rating},
-                        "category": {"$in": categories},
-                        "color": {"$in": colors},
-                        "season": {"$in": seasons},
-                    }
-                },
-                {"$limit": n},
-            ]
+            pipeline = match_on_metadata(
+                min_price=min_price,
+                max_price=max_price,
+                min_rating=min_rating,
+                n=n,
+                categories=categories,
+                colors=colors,
+                seasons=seasons,
+            )
 
         records = collection.aggregate(pipeline)
         logger.debug(f"Running pipeline: {pipeline}")
