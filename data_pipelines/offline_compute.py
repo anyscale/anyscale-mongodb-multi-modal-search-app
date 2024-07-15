@@ -200,7 +200,7 @@ class MistralvLLM:
             enable_lora=False,
             max_num_seqs=max_num_seqs,
             max_model_len=max_model_len,
-            gpu_memory_utilization=0.95,
+            gpu_memory_utilization=0.90,
             skip_tokenizer_init=True,
             kv_cache_dtype=kv_cache_dtype,
             preemption_mode="swap",
