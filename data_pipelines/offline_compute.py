@@ -8,8 +8,8 @@ from typing import Any, Literal
 
 import numpy as np
 import requests
+import ray
 import torchvision
-from ray.util.accelerators import NVIDIA_TESLA_A10G
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
 from vllm.multimodal.image import ImagePixelData
@@ -29,8 +29,8 @@ from data_pipelines.data import MongoBulkInsert, MongoBulkUpdate, read_data
 
 
 class EmbedderSentenceTransformer:
-    def __init__(self, model: str = "thenlper/gte-large"):
-        self.model = SentenceTransformer(model, device="cuda")
+    def __init__(self, model: str = "thenlper/gte-large", device: str = "cuda"):
+        self.model = SentenceTransformer(model, device=device)
 
     def __call__(
         self, batch: dict[str, np.ndarray], cols: list[str]
@@ -42,13 +42,16 @@ class EmbedderSentenceTransformer:
         return batch
 
 
+DESCRIPTION_PROMPT_TEMPLATE = "<image>" * 1176 + (
+    "\nUSER: Generate an ecommerce product description given the image and this title: {title}."
+    "Make sure to include information about the color of the product in the description."
+    "\nASSISTANT:"
+)
+
+
 def gen_description_prompt(row: dict[str, Any]) -> dict[str, Any]:
     title = row["name"]
-    row["description_prompt"] = "<image>" * 1176 + (
-        f"\nUSER: Generate an ecommerce product description given the image and this title: {title}."
-        "Make sure to include information about the color of the product in the description."
-        "\nASSISTANT:"
-    )
+    row["description_prompt"] = DESCRIPTION_PROMPT_TEMPLATE.format(title=title)
 
     return row
 
@@ -121,19 +124,17 @@ class LlaVAMistral:
     ):
         self.llm = LLM(
             model="llava-hf/llava-v1.6-mistral-7b-hf",
-            **{
-                "trust_remote_code": True,
-                "enable_lora": False,
-                "max_num_seqs": max_num_seqs,
-                "max_model_len": max_model_len,
-                "gpu_memory_utilization": 0.95,
-                "image_input_type": "pixel_values",
-                "image_token_id": 32000,
-                "image_input_shape": "1,3,336,336",
-                "image_feature_size": 1176,
-                "kv_cache_dtype": kv_cache_dtype,
-                "preemption_mode": "swap",
-            },
+            trust_remote_code=True,
+            enable_lora=False,
+            max_num_seqs=max_num_seqs,
+            max_model_len=max_model_len,
+            gpu_memory_utilization=0.95,
+            image_input_type="pixel_values",
+            image_token_id=32000,
+            image_input_shape="1,3,336,336",
+            image_feature_size=1176,
+            kv_cache_dtype=kv_cache_dtype,
+            preemption_mode="swap",
         )
         self.sampling_params = SamplingParams(
             n=1,
@@ -190,13 +191,19 @@ class MistralvLLM:
         self,
         max_model_len: int = 4096,
         max_tokens: int = 2048,
+        max_num_seqs: int = 256,
         kv_cache_dtype: str = "fp8",
     ):
         self.llm = LLM(
             model="mistralai/Mistral-7B-Instruct-v0.1",
+            trust_remote_code=True,
+            enable_lora=False,
+            max_num_seqs=max_num_seqs,
             max_model_len=max_model_len,
+            gpu_memory_utilization=0.95,
             skip_tokenizer_init=True,
             kv_cache_dtype=kv_cache_dtype,
+            preemption_mode="swap",
         )
         self.sampling_params = SamplingParams(
             n=1,
@@ -337,38 +344,30 @@ def compute_num_tokens(row: dict[str, np.ndarray], col: str) -> dict[str, np.nda
     return row
 
 
-def estimate_workers(nsamples: int) -> tuple[int, int, int]:
-    if nsamples < 1000:
-        num_llava_workers = 1
-        num_embedder_workers = 1
-        num_mistral_workers_per_classifier = 1
-    elif nsamples < 10000:
-        num_llava_workers = 10
-        num_embedder_workers = 2
-        num_mistral_workers_per_classifier = 2
-    elif nsamples < 100000:
-        num_llava_workers = 20
-        num_embedder_workers = 4
-        num_mistral_workers_per_classifier = 4
-    else:
-        raise NotImplementedError("More than 100k samples not supported yet")
-    return num_llava_workers, num_embedder_workers, num_mistral_workers_per_classifier
-
-
 def run_pipeline(
     path: str,
     nsamples: int,
     mode: Literal["first_run", "update"],
     db_name: str,
     collection_name: str,
+    num_llava_tokenizer_workers: int,
+    num_llava_model_workers: int,
+    llava_model_accelerator_type: str,
+    llava_model_batch_size: int,
+    num_mistral_tokenizer_workers_per_classifier: int,
+    num_mistral_model_workers_per_classifier: int,
+    num_mistral_detokenizer_workers_per_classifier: int,
+    mistral_model_batch_size: int,
+    mistral_model_accelerator_type: str,
+    num_embedder_workers: int,
+    embedding_model_batch_size: int,
+    embedding_model_accelerator_type: str,
+    db_update_batch_size: int,
+    num_db_workers: int,
 ):
+    # 1. Read and preprocess data
     ds = read_data(path, nsamples)
 
-    num_llava_workers, num_embedder_workers, num_mistral_workers_per_classifier = (
-        estimate_workers(nsamples)
-    )
-
-    # generate description using LLAVA model
     ds = (
         ds.map_batches(download_images, num_cpus=4)
         .filter(lambda x: bool(x["img"]))
@@ -377,11 +376,7 @@ def run_pipeline(
         .materialize()
     )
 
-    # compute input/output distribution for LLAVA model
-    # this is required to resolve the maximum model sequence length
-    # this is necessary to maximize KV cache capacity.
-    # The longer the sequence length, the more blocks need to be allocated
-    # per sequence, which reduces the number of sequences that can fit in the cache.
+    # 2. Estimate input/output token distribution for LLAVA model
     max_input_tokens = (
         ds.map(
             LlaVAMistralTokenizer,
@@ -389,20 +384,20 @@ def run_pipeline(
                 "input": "description_prompt",
                 "output": "description_prompt_tokens",
             },
-            concurrency=1,
+            concurrency=num_llava_tokenizer_workers,
             num_cpus=1,
         )
         .select_columns(["description_prompt_tokens"])
         .map(compute_num_tokens, fn_kwargs={"col": "description_prompt_tokens"})
         .max(on="num_tokens")
     )
-    max_output_tokens = 256
+    max_output_tokens = 256  # maximum size of desired product description
     max_model_length = max_input_tokens + max_output_tokens
     print(
         f"Description gen: {max_input_tokens=} {max_output_tokens=} {max_model_length=}"
     )
 
-    # generate description using LLAVA model
+    # 3. Generate description using LLAVA model inference
     ds = ds.map_batches(
         LlaVAMistral,
         fn_constructor_kwargs={
@@ -411,38 +406,13 @@ def run_pipeline(
             "max_num_seqs": 400,
         },
         fn_kwargs={"col": "description_prompt"},
-        batch_size=80,
+        batch_size=llava_model_batch_size,
         num_gpus=1,
-        concurrency=num_llava_workers,
-        accelerator_type=NVIDIA_TESLA_A10G,
+        concurrency=num_llava_model_workers,
+        accelerator_type=llava_model_accelerator_type,
     )
 
-    # generate embeddings
-    ds = ds.map_batches(
-        EmbedderSentenceTransformer,
-        fn_kwargs={"cols": ["name", "description"]},
-        batch_size=80,
-        num_gpus=1,
-        concurrency=num_embedder_workers,
-        accelerator_type=NVIDIA_TESLA_A10G,
-    )
-
-    # compute classifier outputs locally
-    # TODO - move to ray data call
-    mistral_tokenizer = AutoTokenizer.from_pretrained(
-        "mistralai/Mistral-7B-Instruct-v0.1"
-    )
-    buffer_size = 40
-    for classifier, classifier_spec in classifiers.items():
-        classifier_spec["max_output_tokens"] = (
-            max(
-                len(mistral_tokenizer.encode(class_))
-                for class_ in classifier_spec["classes"]
-            )
-            + buffer_size
-        )
-
-    # generate classifier prompts and responses
+    # 4. Generate classifier prompts and tokenize them
     for classifier, classifier_spec in classifiers.items():
         ds = (
             ds.map(
@@ -459,13 +429,41 @@ def run_pipeline(
                     "input": f"{classifier}_prompt",
                     "output": f"{classifier}_prompt_tokens",
                 },
-                concurrency=1,
+                concurrency=num_mistral_tokenizer_workers_per_classifier,
                 num_cpus=1,
             )
             .materialize()
         )
 
-        # compute input/output distribution for Mistral model
+    # 5. Estimate input/output token distribution for Mistral models
+    for classifier, classifier_spec in classifiers.items():
+        max_output_tokens = (
+            ray.data.from_items(
+                [
+                    {
+                        "output": max(classifier_spec["classes"], key=len),
+                    }
+                ]
+            )
+            .map(
+                MistralTokenizer,
+                fn_kwargs={
+                    "input": "output",
+                    "output": "output_tokens",
+                },
+                concurrency=1,
+                num_cpus=1,
+            )
+            .map(
+                compute_num_tokens,
+                fn_kwargs={"col": "output_tokens"},
+            )
+            .max(on="num_tokens")
+        )
+        # allow for 40 tokens of buffer to account for non-exact outputs e.g "the color is Red" instead of just "Red"
+        buffer_size = 40
+        classifier_spec["max_output_tokens"] = max_output_tokens + buffer_size
+
         max_input_tokens = (
             ds.select_columns([f"{classifier}_prompt_tokens"])
             .map(compute_num_tokens, fn_kwargs={"col": f"{classifier}_prompt_tokens"})
@@ -476,7 +474,7 @@ def run_pipeline(
         max_model_length = max_input_tokens + max_output_tokens
         classifier_spec["max_model_length"] = max_model_length
 
-    # generate classifier responses
+    # 6. Generate classifier responses using Mistral model inference
     for classifier, classifier_spec in classifiers.items():
         ds = (
             ds.map_batches(
@@ -489,15 +487,15 @@ def run_pipeline(
                     "max_model_len": classifier_spec["max_model_length"],
                     "max_tokens": classifier_spec["max_output_tokens"],
                 },
-                batch_size=80,
-                num_gpus=num_mistral_workers_per_classifier,
-                concurrency=1,
-                accelerator_type=NVIDIA_TESLA_A10G,
+                batch_size=mistral_model_batch_size,
+                num_gpus=1,
+                concurrency=num_mistral_model_workers_per_classifier,
+                accelerator_type=mistral_model_accelerator_type,
             )
             .map(
                 MistralDeTokenizer,
                 fn_kwargs={"key": f"{classifier}_response"},
-                concurrency=1,
+                concurrency=num_mistral_detokenizer_workers_per_classifier,
                 num_cpus=1,
             )
             .map(
@@ -509,7 +507,17 @@ def run_pipeline(
             )
         )
 
-    # write out to db
+    # 7. Generate embeddings using embedding model inference
+    ds = ds.map_batches(
+        EmbedderSentenceTransformer,
+        fn_kwargs={"cols": ["name", "description"]},
+        batch_size=embedding_model_batch_size,
+        num_gpus=1,
+        concurrency=num_embedder_workers,
+        accelerator_type=embedding_model_accelerator_type,
+    )
+
+    # 8. Bulk upsert records in MongoDB
     mongo_bulk_op: MongoBulkInsert | MongoBulkUpdate
     if mode == "first_run":
         mongo_bulk_op = MongoBulkInsert
@@ -524,10 +532,10 @@ def run_pipeline(
                 "db": db_name,
                 "collection": collection_name,
             },
-            batch_size=80,
-            concurrency=10,
+            batch_size=db_update_batch_size,
+            concurrency=num_db_workers,
             num_cpus=0.1,
-            zero_copy_batch=True,
+            batch_format="pandas",
         )
         .materialize()
     )
