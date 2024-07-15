@@ -1,5 +1,5 @@
 name: enrich-data-and-upsert
-entrypoint: python cli.py --data-path s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset_deduped_10000.csv --nsamples 10000 --mode first_run --collection-name myntra-new
+entrypoint: python cli.py --data-path s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset_deduped_10000.csv --nsamples 10000 --mode first_run --collection-name myntra-items-offline
 working_dir: .
 requirements: requirements.txt
 env_vars:
