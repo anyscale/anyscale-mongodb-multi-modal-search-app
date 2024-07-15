@@ -4,6 +4,7 @@ working_dir: .
 requirements: requirements.txt
 env_vars:
   DB_CONNECTION_STRING: <your mongodb connection string>
+  HF_TOKEN: <your huggingface token>
 compute_config:
   cloud: "Anyscale Cloud"
   head_node:
