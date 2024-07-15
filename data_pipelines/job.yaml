@@ -1,0 +1,18 @@
+name: enrich-data-and-upsert
+entrypoint: python cli.py --data-path s3://anyscale-public-materials/mongodb-demo/raw/myntra_subset_deduped_10000.csv --nsamples 10000 --mode first_run --collection-name myntra-new
+working_dir: .
+requirements: requirements.txt
+env_vars:
+  DB_CONNECTION_STRING: <your mongodb connection string>
+  HF_TOKEN: <your huggingface token>
+compute_config:
+  cloud: "Anyscale Cloud"
+  head_node:
+    instance_type: m5.8xlarge
+  worker_nodes:
+  - instance_type: m5.8xlarge
+    min_nodes: 0
+    max_nodes: 10
+  - instance_type: g5.xlarge
+    min_nodes: 0
+    max_nodes: 40

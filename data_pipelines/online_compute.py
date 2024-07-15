@@ -7,7 +7,7 @@ import os
 import ray
 from openai import OpenAI
 
-from data_pipelines.data import MongoBulkInsert, MongoBulkUpdate, read_data
+from data import MongoBulkInsert, MongoBulkUpdate, read_data
 
 
 def query_embedding(
@@ -258,6 +258,9 @@ def run_pipeline(
     mode: Literal["first_run", "update"],
     db_name: str,
     collection_name: str,
+    max_concurrency_model: int = 29,
+    max_concurrency_mongo: int = 10,
+    batch_size_mongo: int = 10,
 ):
     ray.init(
         # add env vars
@@ -273,8 +276,8 @@ def run_pipeline(
 
     ds = (
         read_data(path, nsamples)
-        .map(update_record, concurrency=29, num_cpus=0.01)
-        .filter(not_missing_data, concurrency=29, num_cpus=0.01)
+        .map(update_record, concurrency=max_concurrency_model, num_cpus=0.01)
+        .filter(not_missing_data, concurrency=max_concurrency_model, num_cpus=0.01)
     )
 
     mongo_bulk_op: MongoBulkInsert | MongoBulkUpdate
@@ -287,10 +290,9 @@ def run_pipeline(
         ds.map_batches(
             mongo_bulk_op,
             fn_constructor_kwargs={"db": db_name, "collection": collection_name},
-            batch_size=10,
-            concurrency=10,
+            batch_size=batch_size_mongo,
+            concurrency=max_concurrency_mongo,
             num_cpus=0.1,
-            zero_copy_batch=True,
             batch_format="pandas",
         ).materialize()
     )
