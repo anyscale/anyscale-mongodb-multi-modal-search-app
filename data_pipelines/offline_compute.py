@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Literal
+from typing import Any, Literal, Type
 
 import numpy as np
 import requests
@@ -339,7 +339,7 @@ def update_record(batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     }
 
 
-def compute_num_tokens(row: dict[str, np.ndarray], col: str) -> dict[str, np.ndarray]:
+def compute_num_tokens(row: dict[str, Any], col: str) -> dict[str, Any]:
     row["num_tokens"] = len(row[col])
     return row
 
@@ -518,7 +518,7 @@ def run_pipeline(
     )
 
     # 8. Bulk upsert records in MongoDB
-    mongo_bulk_op: MongoBulkInsert | MongoBulkUpdate
+    mongo_bulk_op: Type[MongoBulkInsert] | Type[MongoBulkUpdate]
     if mode == "first_run":
         mongo_bulk_op = MongoBulkInsert
     elif mode == "update":
