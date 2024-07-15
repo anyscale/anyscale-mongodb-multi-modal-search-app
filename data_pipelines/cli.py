@@ -54,19 +54,19 @@ class ScalingConfig(BaseModel):
         elif nsamples < 100_000:
             return cls(
                 num_llava_tokenizer_workers=2,
-                num_llava_model_workers=5 * nsamples // 4_000,
+                num_llava_model_workers=5 * nsamples // 1_000,
                 llava_model_accelerator_type=NVIDIA_TESLA_A10G,
                 llava_model_batch_size=80,
                 num_mistral_tokenizer_workers_per_classifier=2,
-                num_mistral_model_workers_per_classifier=1 * nsamples // 4_000,
+                num_mistral_model_workers_per_classifier=1 * nsamples // 1_000,
                 num_mistral_detokenizer_workers_per_classifier=2,
                 mistral_model_batch_size=80,
                 mistral_model_accelerator_type=NVIDIA_TESLA_A10G,
-                num_embedder_workers=1 * nsamples // 4_000,
+                num_embedder_workers=1 * nsamples // 1_000,
                 embedding_model_batch_size=80,
                 embedding_model_accelerator_type=NVIDIA_TESLA_A10G,
                 db_update_batch_size=80,
-                num_db_workers=min(1 * nsamples // 4_000, 10),
+                num_db_workers=min(1 * nsamples // 1_000, 10),
             )
         else:
             raise NotImplementedError("More than 100k samples not supported yet")
