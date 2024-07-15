@@ -1,14 +1,14 @@
 """CLI for running the data pipelines"""
 
-from typing import Literal
+from enum import Enum
 
 import typer
-
 from pydantic import BaseModel
-from data_pipelines.data import clear_data_in_collection, setup_collection
-from data_pipelines.offline_compute import run_pipeline as offline_run_pipeline
-from data_pipelines.online_compute import run_pipeline as online_run_pipeline
 from ray.util.accelerators import NVIDIA_TESLA_A10G
+
+from data import clear_data_in_collection, setup_collection
+from offline_compute import run_pipeline as offline_run_pipeline
+from online_compute import run_pipeline as online_run_pipeline
 
 app = typer.Typer()
 
@@ -33,9 +33,9 @@ class ScalingConfig(BaseModel):
     num_db_workers: int
 
     @classmethod
-    def estimate(nsamples: int) -> "ScalingConfig":
+    def estimate(cls, nsamples: int) -> "ScalingConfig":
         if nsamples < 1_000:
-            return ScalingConfig(
+            return cls(
                 num_llava_tokenizer_workers=1,
                 num_llava_model_workers=1,
                 llava_model_accelerator_type=NVIDIA_TESLA_A10G,
@@ -52,7 +52,7 @@ class ScalingConfig(BaseModel):
                 num_db_workers=1,
             )
         elif nsamples < 100_000:
-            return ScalingConfig(
+            return cls(
                 num_llava_tokenizer_workers=2,
                 num_llava_model_workers=5 * nsamples // 4_000,
                 llava_model_accelerator_type=NVIDIA_TESLA_A10G,
@@ -72,25 +72,37 @@ class ScalingConfig(BaseModel):
             raise NotImplementedError("More than 100k samples not supported yet")
 
 
+class InferenceTypeEnum(str, Enum):
+    offline = "offline"
+    online = "online"
+
+
+class ModeTypeEnum(str, Enum):
+    first_run = "first_run"
+    update = "update"
+
+
 @app.command()
 def main(
     data_path: str = typer.Option(..., help="Path to the data file"),
     nsamples: int = typer.Option(1000, help="Number of samples to process"),
     db_name: str = "myntra",
     collection_name: str = "myntra-items-offline",
-    inference_type: Literal["offline", "online"] = "offline",
-    mode: Literal["first_run", "update"] = "update",
+    inference_type: InferenceTypeEnum = InferenceTypeEnum.offline,
+    mode: ModeTypeEnum = ModeTypeEnum.first_run,
     cluster_size: str = "m0",
-    scaling_config_path: str | None = None,
+    scaling_config_path: str = "",
 ):
     if mode == "first_run":
         print("Setting up collection")
-        setup_collection(collection_name, cluster_size)
-        clear_data_in_collection(collection_name)
+        setup_collection(
+            db_name=db_name, collection_name=collection_name, cluster_size=cluster_size
+        )
+        clear_data_in_collection(db_name=db_name, collection_name=collection_name)
 
     if inference_type == "offline":
-        
-        if scaling_config_path is not None:
+
+        if scaling_config_path:
             with open(scaling_config_path, "r") as f:
                 scaling_config = ScalingConfig.model_validate_json(f.read())
         else:
@@ -99,6 +111,7 @@ def main(
         offline_run_pipeline(
             path=data_path,
             nsamples=nsamples,
+            mode=mode.value,
             db_name=db_name,
             collection_name=collection_name,
             **scaling_config.model_dump(),
@@ -121,7 +134,7 @@ def main(
         online_run_pipeline(
             path=data_path,
             nsamples=nsamples,
-            mode=mode,
+            mode=mode.value,
             db_name=db_name,
             collection_name=collection_name,
         )

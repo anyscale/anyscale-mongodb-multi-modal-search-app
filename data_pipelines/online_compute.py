@@ -7,7 +7,7 @@ import os
 import ray
 from openai import OpenAI
 
-from data_pipelines.data import MongoBulkInsert, MongoBulkUpdate, read_data
+from data import MongoBulkInsert, MongoBulkUpdate, read_data
 
 
 def query_embedding(

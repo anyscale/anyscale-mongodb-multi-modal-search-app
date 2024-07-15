@@ -16,7 +16,7 @@ from vllm.multimodal.image import ImagePixelData
 from vllm import LLM, SamplingParams
 from PIL import Image
 
-from data_pipelines.data import MongoBulkInsert, MongoBulkUpdate, read_data
+from data import MongoBulkInsert, MongoBulkUpdate, read_data
 
 # BERT model not supported yet in vllm
 # class EmbedderVLLM:
