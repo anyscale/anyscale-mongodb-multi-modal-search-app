@@ -350,6 +350,7 @@ def run_pipeline(
     mode: Literal["first_run", "update"],
     db_name: str,
     collection_name: str,
+    num_image_download_workers: int,
     num_llava_tokenizer_workers: int,
     num_llava_model_workers: int,
     llava_model_accelerator_type: str,
@@ -369,7 +370,7 @@ def run_pipeline(
     ds = read_data(path, nsamples)
 
     ds = (
-        ds.map_batches(download_images, num_cpus=4)
+        ds.map_batches(download_images, num_cpus=4, concurrency=num_image_download_workers)
         .filter(lambda x: bool(x["img"]))
         .map(LargestCenterSquare(size=336))
         .map(gen_description_prompt)

@@ -14,6 +14,7 @@ app = typer.Typer()
 
 
 class ScalingConfig(BaseModel):
+    num_image_download_workers: int
     num_llava_tokenizer_workers: int
     num_llava_model_workers: int
     llava_model_accelerator_type: str
@@ -36,6 +37,7 @@ class ScalingConfig(BaseModel):
     def estimate(cls, nsamples: int) -> "ScalingConfig":
         if nsamples < 1_000:
             return cls(
+                num_image_download_workers=1,
                 num_llava_tokenizer_workers=1,
                 num_llava_model_workers=1,
                 llava_model_accelerator_type=NVIDIA_TESLA_A10G,
@@ -53,8 +55,9 @@ class ScalingConfig(BaseModel):
             )
         elif nsamples < 100_000:
             return cls(
+                num_image_download_workers=3 * nsamples // 1_000,
                 num_llava_tokenizer_workers=2,
-                num_llava_model_workers=5 * nsamples // 1_000,
+                num_llava_model_workers=4 * nsamples // 1_000,
                 llava_model_accelerator_type=NVIDIA_TESLA_A10G,
                 llava_model_batch_size=80,
                 num_mistral_tokenizer_workers_per_classifier=2,
@@ -107,7 +110,8 @@ def main(
                 scaling_config = ScalingConfig.model_validate_json(f.read())
         else:
             scaling_config = ScalingConfig.estimate(nsamples)
-
+        
+        print(f"using {scaling_config=}")
         offline_run_pipeline(
             path=data_path,
             nsamples=nsamples,
