@@ -15,4 +15,4 @@ compute_config:
     max_nodes: 10
   - instance_type: g5.xlarge
     min_nodes: 0
-    max_nodes: 10
+    max_nodes: 40
