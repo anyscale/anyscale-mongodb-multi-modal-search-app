@@ -1,0 +1,11 @@
+# base image: anyscale/ray:2.24.0-py311
+# online
+openai==1.35.7
+# offline
+vllm==0.5.0.post1
+sentence-transformers==3.0.1
+torchvision==0.18.0
+torch==2.3.0
+# data
+pymongo==4.8.0
+pymongoarrow==1.4.0
