@@ -122,6 +122,33 @@ Check the status of the job by visiting the Anyscale Job interface
 
 <img src="https://anyscale-public-materials.s3.us-west-2.amazonaws.com/mongodb-demo/screenshots/job-status.png" width="800px" alt="job-status">
 
+### Step 3
+Note, if you are using a small cluster size of "m0", "m2" or "m5" you will need to manually create the search indices in MongoDB. 
+
+If instead you chose a larger cluster size, you can skip this step. The search index would have been automatically and programmatically created for you.
+
+To do so, follow these steps
+1. Select your database 
+2. Click on the "Search Indexes" tab or the "Atlas Search" tab
+<img src="https://anyscale-public-materials.s3.us-west-2.amazonaws.com/mongodb-demo/screenshots/create_index_manual.png" width="800px" alt="create-index-manual">
+3. Click on the "Create a Search index" button
+
+From here on, follow these steps to build the Atlas Vector Search Index
+1. Click on the "JSON Editor" Option
+<img src="https://anyscale-public-materials.s3.us-west-2.amazonaws.com/mongodb-demo/screenshots/atlas_vector_search_json_editor_selected.png" width="800px" alt="json-editor-selected">
+
+2. Click Next
+3. Copy the JSON [from here](https://github.com/anyscale/mongodb-multi-modal-search-prototype/blob/main/data_pipelines/data.py#L88), select your collection in the left-hand menu and click Next
+<img src="https://anyscale-public-materials.s3.us-west-2.amazonaws.com/mongodb-demo/screenshots/atlas_vector_search_json_editor_full.png" width="800px" alt="json-editor-full">
+
+From here on, follow these steps to build the Atlas Search Index
+1. Click on the "JSON Editor" Option
+<img src="https://anyscale-public-materials.s3.us-west-2.amazonaws.com/mongodb-demo/screenshots/atlas_search_json_editor_selected.png" width="800px" alt="json-editor-selected">
+
+2. Click Next
+3. Copy the JSON [from here](https://github.com/anyscale/mongodb-multi-modal-search-prototype/blob/main/data_pipelines/data.py#L69), select your collection in the left-hand menu, and click Next
+<img src="https://anyscale-public-materials.s3.us-west-2.amazonaws.com/mongodb-demo/screenshots/atlas_search_json_editor_full.png" width="800px" alt="json-editor-full">
+
 ## 4. Deploy an Anyscale Service to serve the application
 
 ### Step 1
@@ -131,7 +158,7 @@ Deploy the application by running the following command
 ```bash
 cd applications/
 anyscale service deploy -f app.yaml
-```
+````
 
 ### Step 2
 
